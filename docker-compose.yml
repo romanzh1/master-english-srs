@@ -1,0 +1,39 @@
+version: '3.8'
+
+
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: master-english-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: master-english-postgres
+    volumes:
+      - /home/roman_zh1/personal-projects/postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  bot:
+    build: .
+    container_name: master-english-srs
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: master-english-postgres
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID}
+      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET}
+      AZURE_REDIRECT_URI: ${AZURE_REDIRECT_URI}
+      REMINDER_TIME: "09:00"
+    depends_on:
+      postgres:
+        condition: service_healthy
