@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/yourusername/master-english-srs/internal/models"
 )
@@ -13,11 +14,14 @@ func (r Postgres) CreatePageReference(ctx context.Context, page *models.PageRefe
 
 	sql, args, err := query.ToSql()
 	if err != nil {
-		return err
+		return fmt.Errorf("build SQL query (page_id: %s, user_id: %d): %w", page.PageID, page.UserID, err)
 	}
 
 	_, err = r.db.ExecContext(ctx, sql, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("create page reference (page_id: %s, user_id: %d, title: %s): %w", page.PageID, page.UserID, page.Title, err)
+	}
+	return nil
 }
 
 func (r Postgres) GetPageReference(ctx context.Context, pageID string, userID int64) (*models.PageReference, error) {
@@ -41,7 +45,7 @@ func (r Postgres) GetPageReference(ctx context.Context, pageID string, userID in
 	)
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get page reference (page_id: %s, user_id: %d): %w", pageID, userID, err)
 	}
 
 	return &page, nil
@@ -57,7 +61,7 @@ func (r Postgres) GetUserPages(ctx context.Context, userID int64) ([]*models.Pag
 
 	rows, err := r.db.QueryContext(ctx, query, userID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query user pages (user_id: %d): %w", userID, err)
 	}
 	defer rows.Close()
 
@@ -76,12 +80,16 @@ func (r Postgres) GetUserPages(ctx context.Context, userID int64) ([]*models.Pag
 			&page.LastSynced,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan page row (user_id: %d): %w", userID, err)
 		}
 		pages = append(pages, &page)
 	}
 
-	return pages, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate page rows (user_id: %d): %w", userID, err)
+	}
+
+	return pages, nil
 }
 
 func (r Postgres) DeleteUserPages(ctx context.Context, userID int64) error {
@@ -90,11 +98,14 @@ func (r Postgres) DeleteUserPages(ctx context.Context, userID int64) error {
 
 	sql, args, err := query.ToSql()
 	if err != nil {
-		return err
+		return fmt.Errorf("build SQL query (user_id: %d): %w", userID, err)
 	}
 
 	_, err = r.db.ExecContext(ctx, sql, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("delete user pages (user_id: %d): %w", userID, err)
+	}
+	return nil
 }
 
 func (r Postgres) GetMaxPageNumber(ctx context.Context, userID int64) (int, error) {
@@ -104,10 +115,13 @@ func (r Postgres) GetMaxPageNumber(ctx context.Context, userID int64) (int, erro
 
 	sql, args, err := query.ToSql()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("build SQL query (user_id: %d): %w", userID, err)
 	}
 
 	var maxNum int
 	err = r.db.QueryRowContext(ctx, sql, args...).Scan(&maxNum)
-	return maxNum, err
+	if err != nil {
+		return 0, fmt.Errorf("get max page number (user_id: %d): %w", userID, err)
+	}
+	return maxNum, nil
 }

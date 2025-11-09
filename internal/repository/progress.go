@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/yourusername/master-english-srs/internal/models"
@@ -15,11 +16,14 @@ func (r Postgres) CreateProgress(ctx context.Context, progress *models.UserProgr
 
 	sql, args, err := query.ToSql()
 	if err != nil {
-		return err
+		return fmt.Errorf("build SQL query (user_id: %d, page_id: %s): %w", progress.UserID, progress.PageID, err)
 	}
 
 	_, err = r.db.ExecContext(ctx, sql, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("create progress (user_id: %d, page_id: %s): %w", progress.UserID, progress.PageID, err)
+	}
+	return nil
 }
 
 func (r Postgres) GetProgress(ctx context.Context, userID int64, pageID string) (*models.UserProgress, error) {
@@ -43,7 +47,7 @@ func (r Postgres) GetProgress(ctx context.Context, userID int64, pageID string) 
 	)
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get progress (user_id: %d, page_id: %s): %w", userID, pageID, err)
 	}
 
 	if lastReview.Valid {
@@ -63,11 +67,14 @@ func (r Postgres) UpdateProgress(ctx context.Context, userID int64, pageID strin
 
 	sql, args, err := query.ToSql()
 	if err != nil {
-		return err
+		return fmt.Errorf("build SQL query (user_id: %d, page_id: %s): %w", userID, pageID, err)
 	}
 
 	_, err = r.db.ExecContext(ctx, sql, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("update progress (user_id: %d, page_id: %s, repetition_count: %d): %w", userID, pageID, repetitionCount, err)
+	}
+	return nil
 }
 
 func (r Postgres) AddProgressHistory(ctx context.Context, userID int64, pageID string, history models.ProgressHistory) error {
@@ -77,11 +84,14 @@ func (r Postgres) AddProgressHistory(ctx context.Context, userID int64, pageID s
 
 	sql, args, err := query.ToSql()
 	if err != nil {
-		return err
+		return fmt.Errorf("build SQL query (user_id: %d, page_id: %s): %w", userID, pageID, err)
 	}
 
 	_, err = r.db.ExecContext(ctx, sql, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("add progress history (user_id: %d, page_id: %s, date: %s): %w", userID, pageID, history.Date.Format(time.RFC3339), err)
+	}
+	return nil
 }
 
 func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64) ([]*models.PageWithProgress, error) {
@@ -99,7 +109,7 @@ func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64) ([]*models
 
 	rows, err := r.db.QueryContext(ctx, query, userID, now)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query due pages (user_id: %d, cutoff_time: %s): %w", userID, now.Format(time.RFC3339), err)
 	}
 	defer rows.Close()
 
@@ -125,7 +135,7 @@ func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64) ([]*models
 			&pwp.Progress.SuccessRate,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan page with progress row (user_id: %d): %w", userID, err)
 		}
 
 		pwp.Progress = &models.UserProgress{
@@ -144,7 +154,11 @@ func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64) ([]*models
 		result = append(result, &pwp)
 	}
 
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate due pages rows (user_id: %d): %w", userID, err)
+	}
+
+	return result, nil
 }
 
 func (r Postgres) ProgressExists(ctx context.Context, userID int64, pageID string) (bool, error) {
@@ -152,10 +166,13 @@ func (r Postgres) ProgressExists(ctx context.Context, userID int64, pageID strin
 
 	sql, args, err := query.ToSql()
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("build SQL query (user_id: %d, page_id: %s): %w", userID, pageID, err)
 	}
 
 	var count int
 	err = r.db.QueryRowContext(ctx, sql, args...).Scan(&count)
-	return count > 0, err
+	if err != nil {
+		return false, fmt.Errorf("check progress exists (user_id: %d, page_id: %s): %w", userID, pageID, err)
+	}
+	return count > 0, nil
 }

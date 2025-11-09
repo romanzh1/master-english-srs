@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/yourusername/master-english-srs/internal/models"
 )
@@ -13,11 +14,14 @@ func (r Postgres) CreateUser(ctx context.Context, user *models.User) error {
 
 	sql, args, err := query.ToSql()
 	if err != nil {
-		return err
+		return fmt.Errorf("build SQL query (telegram_id: %d): %w", user.TelegramID, err)
 	}
 
 	_, err = r.db.ExecContext(ctx, sql, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("create user (telegram_id: %d, username: %s): %w", user.TelegramID, user.Username, err)
+	}
+	return nil
 }
 
 func (r Postgres) GetUser(ctx context.Context, telegramID int64) (*models.User, error) {
@@ -44,7 +48,7 @@ func (r Postgres) GetUser(ctx context.Context, telegramID int64) (*models.User, 
 	)
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
 	}
 
 	if user.AccessToken != nil && user.RefreshToken != nil && user.ExpiresAt != nil {
@@ -70,12 +74,15 @@ func (r Postgres) UserExists(ctx context.Context, telegramID int64) (bool, error
 
 	sql, args, err := query.ToSql()
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("build SQL query (telegram_id: %d): %w", telegramID, err)
 	}
 
 	var count int
 	err = r.db.QueryRowContext(ctx, sql, args...).Scan(&count)
-	return count > 0, err
+	if err != nil {
+		return false, fmt.Errorf("check user exists (telegram_id: %d): %w", telegramID, err)
+	}
+	return count > 0, nil
 }
 
 func (r Postgres) UpdateUserLevel(ctx context.Context, telegramID int64, level string) error {
@@ -85,11 +92,14 @@ func (r Postgres) UpdateUserLevel(ctx context.Context, telegramID int64, level s
 
 	sql, args, err := query.ToSql()
 	if err != nil {
-		return err
+		return fmt.Errorf("build SQL query (telegram_id: %d, level: %s): %w", telegramID, level, err)
 	}
 
 	_, err = r.db.ExecContext(ctx, sql, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("update user level (telegram_id: %d, level: %s): %w", telegramID, level, err)
+	}
+	return nil
 }
 
 func (r Postgres) UpdateOneNoteAuth(ctx context.Context, telegramID int64, auth *models.OneNoteAuth) error {
@@ -101,11 +111,14 @@ func (r Postgres) UpdateOneNoteAuth(ctx context.Context, telegramID int64, auth 
 
 	sql, args, err := query.ToSql()
 	if err != nil {
-		return err
+		return fmt.Errorf("build SQL query (telegram_id: %d): %w", telegramID, err)
 	}
 
 	_, err = r.db.ExecContext(ctx, sql, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("update OneNote auth (telegram_id: %d): %w", telegramID, err)
+	}
+	return nil
 }
 
 func (r Postgres) UpdateOneNoteConfig(ctx context.Context, telegramID int64, config *models.OneNoteConfig) error {
@@ -116,11 +129,14 @@ func (r Postgres) UpdateOneNoteConfig(ctx context.Context, telegramID int64, con
 
 	sql, args, err := query.ToSql()
 	if err != nil {
-		return err
+		return fmt.Errorf("build SQL query (telegram_id: %d, notebook_id: %s): %w", telegramID, config.NotebookID, err)
 	}
 
 	_, err = r.db.ExecContext(ctx, sql, args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("update OneNote config (telegram_id: %d, notebook_id: %s): %w", telegramID, config.NotebookID, err)
+	}
+	return nil
 }
 
 func (r Postgres) GetAllUsersWithReminders(ctx context.Context) ([]*models.User, error) {
@@ -133,7 +149,7 @@ func (r Postgres) GetAllUsersWithReminders(ctx context.Context) ([]*models.User,
 
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query users: %w", err)
 	}
 	defer rows.Close()
 
@@ -154,7 +170,7 @@ func (r Postgres) GetAllUsersWithReminders(ctx context.Context) ([]*models.User,
 			&user.CreatedAt,
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan user row: %w", err)
 		}
 
 		if user.AccessToken != nil && user.RefreshToken != nil && user.ExpiresAt != nil {
@@ -175,5 +191,9 @@ func (r Postgres) GetAllUsersWithReminders(ctx context.Context) ([]*models.User,
 		users = append(users, &user)
 	}
 
-	return users, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate user rows: %w", err)
+	}
+
+	return users, nil
 }
