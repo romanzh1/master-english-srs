@@ -15,6 +15,7 @@ type User struct {
 	AccessToken  *string    `db:"onenote_access_token"`
 	RefreshToken *string    `db:"onenote_refresh_token"`
 	ExpiresAt    *time.Time `db:"onenote_expires_at"`
+	AuthCode     *string    `db:"onenote_auth_code"`
 	NotebookID   *string    `db:"onenote_notebook_id"`
 	SectionID    *string    `db:"onenote_section_id"`
 }

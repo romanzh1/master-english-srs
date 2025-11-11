@@ -31,8 +31,19 @@ func NewAuthService(clientID, clientSecret, redirectURI string, scopes []string)
 }
 
 func (a *AuthService) GetAuthURL(state string) string {
-	config := a.getOAuthConfig()
-	return config.AuthCodeURL(state, oauth2.AccessTypeOffline)
+	// Manually construct the URL to ensure proper parameter names with underscores
+	// Microsoft OAuth2 v2.0 endpoint
+	authURL := "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+
+	params := url.Values{}
+	params.Set("client_id", a.clientID)
+	params.Set("redirect_uri", a.redirectURI)
+	params.Set("response_type", "code")
+	params.Set("scope", strings.Join(a.scopes, " "))
+	params.Set("state", state)
+	params.Set("prompt", "consent") // Ensures refresh token is returned
+
+	return authURL + "?" + params.Encode()
 }
 
 func (a *AuthService) ExchangeCode(code string) (*TokenResponse, error) {

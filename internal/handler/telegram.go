@@ -8,6 +8,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/yourusername/master-english-srs/internal/models"
+	"github.com/yourusername/master-english-srs/internal/service"
 	"github.com/yourusername/master-english-srs/pkg/onenote"
 	"go.uber.org/zap"
 )
@@ -22,7 +23,6 @@ type Service interface {
 	GetOneNoteNotebooks(ctx context.Context, telegramID int64) ([]onenote.Notebook, error)
 	GetOneNoteSections(ctx context.Context, telegramID int64, notebookID string) ([]onenote.Section, error)
 	SaveOneNoteConfig(ctx context.Context, telegramID int64, notebookID, sectionID string) error
-	SyncPages(ctx context.Context, telegramID int64) (int, error)
 	GetDuePagesToday(ctx context.Context, telegramID int64) ([]*models.PageWithProgress, error)
 	GetUserPages(ctx context.Context, telegramID int64) ([]*models.PageReference, error)
 	GetPageContent(ctx context.Context, telegramID int64, pageID string) (string, error)
@@ -54,8 +54,6 @@ func (h *TelegramHandler) handleCommand(ctx context.Context, update tgbotapi.Upd
 		h.handleStart(ctx, update)
 	case "connect_onenote":
 		h.handleConnectOneNote(ctx, update)
-	case "sync":
-		h.handleSync(ctx, update)
 	case "today":
 		h.handleToday(ctx, update)
 	case "pages":
@@ -91,6 +89,9 @@ func (h *TelegramHandler) handleUpdate(update tgbotapi.Update) {
 
 	if update.Message != nil && update.Message.IsCommand() {
 		h.handleCommand(ctx, update)
+	} else if update.Message != nil {
+		// Обрабатываем текстовые сообщения (например, код авторизации)
+		h.handleTextMessage(ctx, update)
 	} else if update.CallbackQuery != nil {
 		h.handleCallback(ctx, update)
 	}
@@ -150,50 +151,74 @@ func (h *TelegramHandler) handleConnectOneNote(ctx context.Context, update tgbot
 	h.sendMessage(update.Message.Chat.ID, text)
 }
 
-func (h *TelegramHandler) handleSync(ctx context.Context, update tgbotapi.Update) {
+func (h *TelegramHandler) handleTextMessage(ctx context.Context, update tgbotapi.Update) {
 	userID := update.Message.From.ID
+	text := strings.TrimSpace(update.Message.Text)
+
+	// Проверяем, может ли это быть код авторизации (длина от 20 до 200 символов)
+	if len(text) < 20 || len(text) >= 200 {
+		return
+	}
 
 	user, err := h.service.GetUser(ctx, userID)
 	if err != nil {
-		zap.S().Error("get user", zap.Error(err), zap.Int64("telegram_id", userID))
-		h.sendMessage(update.Message.Chat.ID, "Сначала зарегистрируйся с помощью /start")
+		// Пользователь не найден, игнорируем
 		return
 	}
 
-	if user.OneNoteAuth == nil {
-		h.sendMessage(update.Message.Chat.ID, "Сначала подключи OneNote с помощью /connect_onenote")
-		return
-	}
+	// Проверяем, была ли уже авторизация
+	wasAuthorized := user.AccessToken != nil && user.RefreshToken != nil
 
-	if user.OneNoteConfig == nil {
-		h.sendMessage(update.Message.Chat.ID, "Настройка OneNote не завершена. Используй /connect_onenote")
-		return
-	}
-
-	h.sendMessage(update.Message.Chat.ID, "Синхронизирую страницы...")
-
-	count, err := h.service.SyncPages(ctx, userID)
+	// Пытаемся обменять код на токены (работает для новой и обновлённой авторизации)
+	err = h.service.ExchangeAuthCode(ctx, userID, text)
 	if err != nil {
-		zap.S().Error("sync pages", zap.Error(err), zap.Int64("telegram_id", userID))
-		h.sendMessage(update.Message.Chat.ID, "Не удалось синхронизировать страницы.")
+		// Если пользователь не авторизован, показываем ошибку
+		if !wasAuthorized {
+			zap.S().Error("exchange auth code", zap.Error(err), zap.Int64("telegram_id", userID))
+			h.sendMessage(update.Message.Chat.ID, "❌ Не удалось обработать код авторизации. Убедись, что код правильный и не истёк. Попробуй получить новый код через /connect_onenote")
+		}
+		// Если пользователь уже авторизован и код не подошёл, это не код авторизации - игнорируем
 		return
 	}
 
-	h.sendMessage(update.Message.Chat.ID, fmt.Sprintf("✅ Синхронизировано %d страниц", count))
+	// После успешного обмена кода отправляем соответствующее сообщение
+	if wasAuthorized {
+		h.sendMessage(update.Message.Chat.ID, "✅ Авторизация обновлена!")
+	} else {
+		h.sendMessage(update.Message.Chat.ID, "✅ Авторизация успешна! Теперь используй /today для начала занятий.")
+	}
+}
+
+// handleAuthError обрабатывает ошибку авторизации и отправляет пользователю сообщение с запросом повторной авторизации
+func (h *TelegramHandler) handleAuthError(err error, userID, chatID int64) bool {
+	authErr, ok := err.(*service.AuthRequiredError)
+	if !ok {
+		return false
+	}
+
+	zap.S().Warn("authentication required", zap.Int64("telegram_id", authErr.TelegramID))
+	authURL := h.service.GetAuthURL(userID)
+	text := fmt.Sprintf("❌ Требуется повторная авторизация. Твой токен истёк.\n\nПерейди по ссылке для авторизации:\n\n%s\n\nПосле авторизации отправь мне полученный код.", authURL)
+	h.sendMessage(chatID, text)
+	return true
 }
 
 func (h *TelegramHandler) handleToday(ctx context.Context, update tgbotapi.Update) {
 	userID := update.Message.From.ID
+	chatID := update.Message.Chat.ID
 
 	duePages, err := h.service.GetDuePagesToday(ctx, userID)
 	if err != nil {
+		if h.handleAuthError(err, userID, chatID) {
+			return
+		}
 		zap.S().Error("get due pages today", zap.Error(err), zap.Int64("telegram_id", userID))
-		h.sendMessage(update.Message.Chat.ID, "Произошла ошибка.")
+		h.sendMessage(chatID, "Произошла ошибка.")
 		return
 	}
 
 	if len(duePages) == 0 {
-		h.sendMessage(update.Message.Chat.ID, "🎉 Сегодня нет страниц для повторения!")
+		h.sendMessage(chatID, "🎉 Сегодня нет страниц для повторения!")
 		return
 	}
 
@@ -222,15 +247,25 @@ func (h *TelegramHandler) handleToday(ctx context.Context, update tgbotapi.Updat
 	))
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
-	h.sendMessageWithKeyboard(update.Message.Chat.ID, text, keyboard)
+	h.sendMessageWithKeyboard(chatID, text, keyboard)
 }
 
 func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Update) {
 	userID := update.Message.From.ID
+	chatID := update.Message.Chat.ID
 
 	pages, err := h.service.GetUserPages(ctx, userID)
-	if err != nil || len(pages) == 0 {
-		h.sendMessage(update.Message.Chat.ID, "У тебя пока нет страниц. Используй /sync для синхронизации.")
+	if err != nil {
+		if h.handleAuthError(err, userID, chatID) {
+			return
+		}
+		zap.S().Error("get user pages", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка.")
+		return
+	}
+
+	if len(pages) == 0 {
+		h.sendMessage(chatID, "У тебя пока нет страниц. Используй /connect_onenote для подключения OneNote.")
 		return
 	}
 
@@ -256,10 +291,11 @@ func (h *TelegramHandler) handleHelp(ctx context.Context, update tgbotapi.Update
 		
 		/start - Начать работу с ботом
 		/connect_onenote - Подключить OneNote
-		/sync - Синхронизировать страницы из OneNote
 		/today - Показать страницы на сегодня
 		/pages - Список всех страниц
-		/help - Справка`
+		/help - Справка
+
+		Примечание: Страницы синхронизируются автоматически при запросе.`
 
 	h.sendMessage(update.Message.Chat.ID, text)
 }
@@ -297,16 +333,16 @@ func (h *TelegramHandler) handleLevelSelection(ctx context.Context, callback *tg
 
 func (h *TelegramHandler) handleShowPage(ctx context.Context, callback *tgbotapi.CallbackQuery) {
 	pageID := strings.TrimPrefix(callback.Data, "show_")
+	userID := callback.From.ID
+	chatID := callback.Message.Chat.ID
 
-	/*	page, err := h.service.GetUser(ctx, callback.From.ID)
-		if err != nil {
-			return
-		}*/
-
-	content, err := h.service.GetPageContent(ctx, callback.From.ID, pageID)
+	content, err := h.service.GetPageContent(ctx, userID, pageID)
 	if err != nil {
-		zap.S().Error("get page content", zap.Error(err), zap.Int64("telegram_id", callback.From.ID), zap.String("page_id", pageID))
-		h.sendMessage(callback.Message.Chat.ID, "Не удалось получить содержимое страницы.")
+		if h.handleAuthError(err, userID, chatID) {
+			return
+		}
+		zap.S().Error("get page content", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("page_id", pageID))
+		h.sendMessage(chatID, "Не удалось получить содержимое страницы.")
 		return
 	}
 
@@ -394,6 +430,11 @@ func (h *TelegramHandler) checkAndSendReminders() {
 	for _, user := range users {
 		duePages, err := h.service.GetDuePagesToday(ctx, user.TelegramID)
 		if err != nil {
+			// Если требуется авторизация, пропускаем этого пользователя (не отправляем уведомление)
+			if _, ok := err.(*service.AuthRequiredError); ok {
+				zap.S().Warn("authentication required for reminder", zap.Int64("telegram_id", user.TelegramID))
+				continue
+			}
 			zap.S().Error("get due pages for reminder", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
 			continue
 		}

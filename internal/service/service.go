@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/yourusername/master-english-srs/internal/models"
@@ -17,6 +18,7 @@ type Repository interface {
 	UserExists(ctx context.Context, telegramID int64) (bool, error)
 	UpdateUserLevel(ctx context.Context, telegramID int64, level string) error
 	UpdateOneNoteAuth(ctx context.Context, telegramID int64, auth *models.OneNoteAuth) error
+	UpdateAuthCode(ctx context.Context, telegramID int64, authCode string) error
 	UpdateOneNoteConfig(ctx context.Context, telegramID int64, config *models.OneNoteConfig) error
 	GetAllUsersWithReminders(ctx context.Context) ([]*models.User, error)
 
@@ -107,43 +109,122 @@ func (s *Service) ExchangeAuthCode(ctx context.Context, telegramID int64, code s
 		return fmt.Errorf("update OneNote auth (telegram_id: %d): %w", telegramID, err)
 	}
 
+	// Сохраняем код авторизации для последующего использования
+	if err := s.repo.UpdateAuthCode(ctx, telegramID, code); err != nil {
+		zap.S().Warn("failed to save auth code", zap.Error(err), zap.Int64("telegram_id", telegramID))
+	}
+
 	return nil
 }
 
-func (s *Service) GetOneNoteNotebooks(ctx context.Context, telegramID int64) ([]onenote.Notebook, error) {
+// getValidAccessToken получает валидный access token, автоматически обновляя его при необходимости
+// Возвращает ошибку AuthRequiredError, если требуется повторная авторизация пользователя
+func (s *Service) getValidAccessToken(ctx context.Context, telegramID int64) (string, error) {
 	user, err := s.repo.GetUser(ctx, telegramID)
 	if err != nil {
-		return nil, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
+		return "", fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
 	}
 
-	if user.OneNoteAuth == nil {
-		return nil, fmt.Errorf("onenote not connected (telegram_id: %d)", telegramID)
+	// Если нет токенов, нужна авторизация
+	if user.AccessToken == nil || user.RefreshToken == nil || user.ExpiresAt == nil {
+		return "", &AuthRequiredError{TelegramID: telegramID}
 	}
 
-	notebooks, err := s.oneNoteClient.GetNotebooks(user.OneNoteAuth.AccessToken)
+	// Проверяем, не истёк ли токен (с запасом в 5 минут)
+	expiresAt := *user.ExpiresAt
+	if time.Until(expiresAt) > 5*time.Minute {
+		return *user.AccessToken, nil
+	}
+
+	// Токен истёк или скоро истечёт, пытаемся обновить через refresh token
+	zap.S().Info("access token expired or about to expire, refreshing", zap.Int64("telegram_id", telegramID))
+	tokenResp, err := s.authService.RefreshToken(*user.RefreshToken)
 	if err != nil {
-		return nil, fmt.Errorf("get notebooks (telegram_id: %d): %w", telegramID, err)
+		zap.S().Warn("failed to refresh token", zap.Error(err), zap.Int64("telegram_id", telegramID))
+		return s.tryRefreshWithAuthCode(ctx, telegramID, user)
 	}
 
-	return notebooks, nil
+	// Обновляем токены в БД
+	return s.updateTokens(ctx, telegramID, tokenResp)
+}
+
+// tryRefreshWithAuthCode пытается обновить токены через auth code, если refresh token не сработал
+func (s *Service) tryRefreshWithAuthCode(ctx context.Context, telegramID int64, user *models.User) (string, error) {
+	if user.AuthCode == nil || *user.AuthCode == "" {
+		return "", &AuthRequiredError{TelegramID: telegramID}
+	}
+
+	zap.S().Info("trying to exchange auth code", zap.Int64("telegram_id", telegramID))
+	if err := s.ExchangeAuthCode(ctx, telegramID, *user.AuthCode); err != nil {
+		zap.S().Error("failed to exchange auth code", zap.Error(err), zap.Int64("telegram_id", telegramID))
+		return "", &AuthRequiredError{TelegramID: telegramID}
+	}
+
+	// Получаем обновлённого пользователя
+	user, err := s.repo.GetUser(ctx, telegramID)
+	if err != nil {
+		return "", fmt.Errorf("get user after exchange (telegram_id: %d): %w", telegramID, err)
+	}
+
+	if user.AccessToken == nil {
+		return "", &AuthRequiredError{TelegramID: telegramID}
+	}
+
+	return *user.AccessToken, nil
+}
+
+// updateTokens обновляет токены в БД
+func (s *Service) updateTokens(ctx context.Context, telegramID int64, tokenResp *onenote.TokenResponse) (string, error) {
+	auth := &models.OneNoteAuth{
+		AccessToken:  tokenResp.AccessToken,
+		RefreshToken: tokenResp.RefreshToken,
+		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+	}
+
+	if err := s.repo.UpdateOneNoteAuth(ctx, telegramID, auth); err != nil {
+		return "", fmt.Errorf("update OneNote auth after refresh (telegram_id: %d): %w", telegramID, err)
+	}
+
+	return tokenResp.AccessToken, nil
+}
+
+// AuthRequiredError указывает, что требуется повторная авторизация пользователя
+type AuthRequiredError struct {
+	TelegramID int64
+}
+
+func (e *AuthRequiredError) Error() string {
+	return fmt.Sprintf("authentication required for user %d", e.TelegramID)
+}
+
+func (s *Service) GetOneNoteNotebooks(ctx context.Context, telegramID int64) ([]onenote.Notebook, error) {
+	var notebooks []onenote.Notebook
+
+	err := s.withAuthRetry(ctx, telegramID, func(accessToken string) error {
+		result, err := s.oneNoteClient.GetNotebooks(accessToken)
+		if err != nil {
+			return fmt.Errorf("get notebooks (telegram_id: %d): %w", telegramID, err)
+		}
+		notebooks = result
+		return nil
+	})
+
+	return notebooks, err
 }
 
 func (s *Service) GetOneNoteSections(ctx context.Context, telegramID int64, notebookID string) ([]onenote.Section, error) {
-	user, err := s.repo.GetUser(ctx, telegramID)
-	if err != nil {
-		return nil, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
-	}
+	var sections []onenote.Section
 
-	if user.OneNoteAuth == nil {
-		return nil, fmt.Errorf("onenote not connected (telegram_id: %d)", telegramID)
-	}
+	err := s.withAuthRetry(ctx, telegramID, func(accessToken string) error {
+		result, err := s.oneNoteClient.GetSections(accessToken, notebookID)
+		if err != nil {
+			return fmt.Errorf("get sections (telegram_id: %d, notebook_id: %s): %w", telegramID, notebookID, err)
+		}
+		sections = result
+		return nil
+	})
 
-	sections, err := s.oneNoteClient.GetSections(user.OneNoteAuth.AccessToken, notebookID)
-	if err != nil {
-		return nil, fmt.Errorf("get sections (telegram_id: %d, notebook_id: %s): %w", telegramID, notebookID, err)
-	}
-
-	return sections, nil
+	return sections, err
 }
 
 func (s *Service) SaveOneNoteConfig(ctx context.Context, telegramID int64, notebookID, sectionID string) error {
@@ -159,19 +240,29 @@ func (s *Service) SaveOneNoteConfig(ctx context.Context, telegramID int64, noteb
 	return nil
 }
 
-func (s *Service) SyncPages(ctx context.Context, telegramID int64) (int, error) {
+// syncPagesInternal выполняет синхронизацию страниц из OneNote
+func (s *Service) syncPagesInternal(ctx context.Context, telegramID int64) (int, error) {
 	user, err := s.repo.GetUser(ctx, telegramID)
 	if err != nil {
 		return 0, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
 	}
 
-	if user.OneNoteAuth == nil || user.OneNoteConfig == nil {
+	if user.OneNoteConfig == nil {
 		return 0, fmt.Errorf("onenote not configured (telegram_id: %d)", telegramID)
 	}
 
-	pages, err := s.oneNoteClient.GetPages(user.OneNoteAuth.AccessToken, user.OneNoteConfig.SectionID)
+	var pages []onenote.Page
+	err = s.withAuthRetry(ctx, telegramID, func(accessToken string) error {
+		result, err := s.oneNoteClient.GetPages(accessToken, user.OneNoteConfig.SectionID)
+		if err != nil {
+			return fmt.Errorf("get pages (telegram_id: %d, section_id: %s): %w", telegramID, user.OneNoteConfig.SectionID, err)
+		}
+		pages = result
+		return nil
+	})
+
 	if err != nil {
-		return 0, fmt.Errorf("get pages (telegram_id: %d, section_id: %s): %w", telegramID, user.OneNoteConfig.SectionID, err)
+		return 0, err
 	}
 
 	if err := s.repo.DeleteUserPages(ctx, telegramID); err != nil {
@@ -222,30 +313,83 @@ func (s *Service) SyncPages(ctx context.Context, telegramID int64) (int, error) 
 	return len(pages), nil
 }
 
+// withAuthRetry выполняет операцию OneNote API с автоматической обработкой ошибок авторизации
+// Если операция возвращает ошибку авторизации, обновляет токен и повторяет операцию
+func (s *Service) withAuthRetry(ctx context.Context, telegramID int64, operation func(string) error) error {
+	accessToken, err := s.getValidAccessToken(ctx, telegramID)
+	if err != nil {
+		return err
+	}
+
+	err = operation(accessToken)
+	if err == nil {
+		return nil
+	}
+
+	// Если ошибка авторизации, пытаемся обновить токен и повторить
+	if !isAuthError(err) {
+		return err
+	}
+
+	// Получаем новый токен и повторяем операцию
+	accessToken, err = s.getValidAccessToken(ctx, telegramID)
+	if err != nil {
+		return err
+	}
+
+	return operation(accessToken)
+}
+
+// isAuthError проверяет, является ли ошибка ошибкой авторизации (401 или 403)
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "status: 401") || strings.Contains(errStr, "status: 403")
+}
+
 func (s *Service) GetDuePagesToday(ctx context.Context, telegramID int64) ([]*models.PageWithProgress, error) {
+	// Синхронизируем страницы перед получением списка для повторения
+	_, err := s.syncPagesInternal(ctx, telegramID)
+	if err != nil {
+		// Если ошибка авторизации, возвращаем её, иначе просто логируем и продолжаем
+		if _, ok := err.(*AuthRequiredError); ok {
+			return nil, err
+		}
+		zap.S().Warn("failed to sync pages before getting due pages", zap.Error(err), zap.Int64("telegram_id", telegramID))
+	}
+
 	return s.repo.GetDuePagesToday(ctx, telegramID)
 }
 
 func (s *Service) GetUserPages(ctx context.Context, telegramID int64) ([]*models.PageReference, error) {
+	// Синхронизируем страницы перед получением списка
+	_, err := s.syncPagesInternal(ctx, telegramID)
+	if err != nil {
+		// Если ошибка авторизации, возвращаем её, иначе просто логируем и продолжаем
+		if _, ok := err.(*AuthRequiredError); ok {
+			return nil, err
+		}
+		zap.S().Warn("failed to sync pages before getting user pages", zap.Error(err), zap.Int64("telegram_id", telegramID))
+	}
+
 	return s.repo.GetUserPages(ctx, telegramID)
 }
 
 func (s *Service) GetPageContent(ctx context.Context, telegramID int64, pageID string) (string, error) {
-	user, err := s.repo.GetUser(ctx, telegramID)
-	if err != nil {
-		return "", fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
-	}
+	var content string
 
-	if user.OneNoteAuth == nil {
-		return "", fmt.Errorf("onenote not connected (telegram_id: %d)", telegramID)
-	}
+	err := s.withAuthRetry(ctx, telegramID, func(accessToken string) error {
+		result, err := s.oneNoteClient.GetPageContent(accessToken, pageID)
+		if err != nil {
+			return fmt.Errorf("get page content (telegram_id: %d, page_id: %s): %w", telegramID, pageID, err)
+		}
+		content = result
+		return nil
+	})
 
-	content, err := s.oneNoteClient.GetPageContent(user.OneNoteAuth.AccessToken, pageID)
-	if err != nil {
-		return "", fmt.Errorf("get page content (telegram_id: %d, page_id: %s): %w", telegramID, pageID, err)
-	}
-
-	return content, nil
+	return content, err
 }
 
 func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pageID string, success bool) error {

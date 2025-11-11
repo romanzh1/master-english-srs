@@ -27,7 +27,7 @@ func (r Postgres) CreateUser(ctx context.Context, user *models.User) error {
 func (r Postgres) GetUser(ctx context.Context, telegramID int64) (*models.User, error) {
 	query := `
 		SELECT telegram_id, username, level, onenote_access_token, onenote_refresh_token, 
-		       onenote_expires_at, onenote_notebook_id, onenote_section_id, 
+		       onenote_expires_at, onenote_auth_code, onenote_notebook_id, onenote_section_id, 
 		       use_manual_pages, reminder_time, created_at
 		FROM users WHERE telegram_id = $1
 	`
@@ -40,6 +40,7 @@ func (r Postgres) GetUser(ctx context.Context, telegramID int64) (*models.User, 
 		&user.AccessToken,
 		&user.RefreshToken,
 		&user.ExpiresAt,
+		&user.AuthCode,
 		&user.NotebookID,
 		&user.SectionID,
 		&user.UseManualPages,
@@ -121,6 +122,23 @@ func (r Postgres) UpdateOneNoteAuth(ctx context.Context, telegramID int64, auth 
 	return nil
 }
 
+func (r Postgres) UpdateAuthCode(ctx context.Context, telegramID int64, authCode string) error {
+	query := r.psql.Update("users").
+		Set("onenote_auth_code", authCode).
+		Where("telegram_id = ?", telegramID)
+
+	sql, args, err := query.ToSql()
+	if err != nil {
+		return fmt.Errorf("build SQL query (telegram_id: %d): %w", telegramID, err)
+	}
+
+	_, err = r.db.ExecContext(ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("update auth code (telegram_id: %d): %w", telegramID, err)
+	}
+	return nil
+}
+
 func (r Postgres) UpdateOneNoteConfig(ctx context.Context, telegramID int64, config *models.OneNoteConfig) error {
 	query := r.psql.Update("users").
 		Set("onenote_notebook_id", config.NotebookID).
@@ -142,7 +160,7 @@ func (r Postgres) UpdateOneNoteConfig(ctx context.Context, telegramID int64, con
 func (r Postgres) GetAllUsersWithReminders(ctx context.Context) ([]*models.User, error) {
 	query := `
 		SELECT telegram_id, username, level, onenote_access_token, onenote_refresh_token, 
-		       onenote_expires_at, onenote_notebook_id, onenote_section_id, 
+		       onenote_expires_at, onenote_auth_code, onenote_notebook_id, onenote_section_id, 
 		       use_manual_pages, reminder_time, created_at
 		FROM users
 	`
@@ -163,6 +181,7 @@ func (r Postgres) GetAllUsersWithReminders(ctx context.Context) ([]*models.User,
 			&user.AccessToken,
 			&user.RefreshToken,
 			&user.ExpiresAt,
+			&user.AuthCode,
 			&user.NotebookID,
 			&user.SectionID,
 			&user.UseManualPages,
