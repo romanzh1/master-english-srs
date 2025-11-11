@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 
 	"github.com/joho/godotenv"
@@ -10,11 +9,29 @@ import (
 	"github.com/yourusername/master-english-srs/internal/repository"
 	"github.com/yourusername/master-english-srs/internal/service"
 	"github.com/yourusername/master-english-srs/pkg/onenote"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func main() {
+	// Initialize zap logger
+	config := zap.NewDevelopmentConfig()
+	config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	config.EncoderConfig.TimeKey = "timestamp"
+	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+
+	logger, err := config.Build()
+	if err != nil {
+		panic(fmt.Errorf("init logger: %w", err))
+	}
+	defer logger.Sync()
+
+	// Replace global logger
+	zap.ReplaceGlobals(logger)
+	zap.S().Info("logger initialized")
+
 	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found")
+		zap.S().Debug("load .env file", zap.Error(err))
 	}
 
 	telegramToken := os.Getenv("TELEGRAM_BOT_TOKEN")
@@ -28,7 +45,7 @@ func main() {
 	azureRedirectURI := os.Getenv("AZURE_REDIRECT_URI")
 
 	if telegramToken == "" || postgresHost == "" {
-		log.Fatal("Missing required environment variables")
+		zap.S().Fatal("missing required environment variables")
 	}
 
 	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
@@ -36,12 +53,14 @@ func main() {
 
 	repo, err := repository.NewDB(dsn, 10, 20)
 	if err != nil {
-		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
+		zap.S().Error("connect to PostgreSQL", zap.Error(err), zap.String("host", postgresHost))
+		os.Exit(1)
 	}
 	defer repo.Close()
 
 	if err = repo.Up("migrations"); err != nil {
-		log.Fatalf("Could not reload migrations: %v", err)
+		zap.S().Error("run migrations", zap.Error(err))
+		os.Exit(1)
 	}
 
 	scopes := []string{"Notes.Read", "offline_access"}
@@ -52,7 +71,8 @@ func main() {
 
 	bot, err := handler.NewTelegramHandler(telegramToken, svc)
 	if err != nil {
-		log.Fatalf("Failed to create bot: %v", err)
+		zap.S().Error("create telegram handler", zap.Error(err))
+		os.Exit(1)
 	}
 
 	bot.Start()

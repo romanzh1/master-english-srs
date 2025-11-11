@@ -41,7 +41,7 @@ func (a *AuthService) ExchangeCode(code string) (*TokenResponse, error) {
 
 	token, err := config.Exchange(ctx, code)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("exchange code: %w", err)
 	}
 
 	return &TokenResponse{
@@ -61,7 +61,7 @@ func (a *AuthService) RefreshToken(refreshToken string) (*TokenResponse, error) 
 	req, err := http.NewRequest("POST", "https://login.microsoftonline.com/common/oauth2/v2.0/token",
 		strings.NewReader(data.Encode()))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create refresh token request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -69,18 +69,18 @@ func (a *AuthService) RefreshToken(refreshToken string) (*TokenResponse, error) 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("execute refresh token request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("refresh token failed: %s", string(body))
+		return nil, fmt.Errorf("refresh token (status: %d): %s", resp.StatusCode, string(body))
 	}
 
 	var tokenResp TokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode refresh token response: %w", err)
 	}
 
 	return &tokenResp, nil

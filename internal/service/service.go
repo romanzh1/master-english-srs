@@ -3,12 +3,12 @@ package service
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/yourusername/master-english-srs/internal/models"
 	"github.com/yourusername/master-english-srs/internal/srs"
 	"github.com/yourusername/master-english-srs/pkg/onenote"
+	"go.uber.org/zap"
 )
 
 type Repository interface {
@@ -51,11 +51,11 @@ func NewService(repo Repository, authService *onenote.AuthService, oneNoteClient
 func (s *Service) RegisterUser(ctx context.Context, telegramID int64, username, level string) error {
 	exists, err := s.repo.UserExists(ctx, telegramID)
 	if err != nil {
-		return err
+		return fmt.Errorf("check user exists (telegram_id: %d): %w", telegramID, err)
 	}
 
 	if exists {
-		return fmt.Errorf("user already exists")
+		return fmt.Errorf("user already exists (telegram_id: %d)", telegramID)
 	}
 
 	user := &models.User{
@@ -67,7 +67,11 @@ func (s *Service) RegisterUser(ctx context.Context, telegramID int64, username, 
 		CreatedAt:      time.Now(),
 	}
 
-	return s.repo.CreateUser(ctx, user)
+	if err := s.repo.CreateUser(ctx, user); err != nil {
+		return fmt.Errorf("create user (telegram_id: %d, username: %s): %w", telegramID, username, err)
+	}
+
+	return nil
 }
 
 func (s *Service) GetUser(ctx context.Context, telegramID int64) (*models.User, error) {
@@ -90,7 +94,7 @@ func (s *Service) GetAuthURL(telegramID int64) string {
 func (s *Service) ExchangeAuthCode(ctx context.Context, telegramID int64, code string) error {
 	tokenResp, err := s.authService.ExchangeCode(code)
 	if err != nil {
-		return err
+		return fmt.Errorf("exchange auth code (telegram_id: %d): %w", telegramID, err)
 	}
 
 	auth := &models.OneNoteAuth{
@@ -99,33 +103,47 @@ func (s *Service) ExchangeAuthCode(ctx context.Context, telegramID int64, code s
 		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
 	}
 
-	return s.repo.UpdateOneNoteAuth(ctx, telegramID, auth)
+	if err := s.repo.UpdateOneNoteAuth(ctx, telegramID, auth); err != nil {
+		return fmt.Errorf("update OneNote auth (telegram_id: %d): %w", telegramID, err)
+	}
+
+	return nil
 }
 
 func (s *Service) GetOneNoteNotebooks(ctx context.Context, telegramID int64) ([]onenote.Notebook, error) {
 	user, err := s.repo.GetUser(ctx, telegramID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
 	}
 
 	if user.OneNoteAuth == nil {
-		return nil, fmt.Errorf("onenote not connected")
+		return nil, fmt.Errorf("onenote not connected (telegram_id: %d)", telegramID)
 	}
 
-	return s.oneNoteClient.GetNotebooks(user.OneNoteAuth.AccessToken)
+	notebooks, err := s.oneNoteClient.GetNotebooks(user.OneNoteAuth.AccessToken)
+	if err != nil {
+		return nil, fmt.Errorf("get notebooks (telegram_id: %d): %w", telegramID, err)
+	}
+
+	return notebooks, nil
 }
 
 func (s *Service) GetOneNoteSections(ctx context.Context, telegramID int64, notebookID string) ([]onenote.Section, error) {
 	user, err := s.repo.GetUser(ctx, telegramID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
 	}
 
 	if user.OneNoteAuth == nil {
-		return nil, fmt.Errorf("onenote not connected")
+		return nil, fmt.Errorf("onenote not connected (telegram_id: %d)", telegramID)
 	}
 
-	return s.oneNoteClient.GetSections(user.OneNoteAuth.AccessToken, notebookID)
+	sections, err := s.oneNoteClient.GetSections(user.OneNoteAuth.AccessToken, notebookID)
+	if err != nil {
+		return nil, fmt.Errorf("get sections (telegram_id: %d, notebook_id: %s): %w", telegramID, notebookID, err)
+	}
+
+	return sections, nil
 }
 
 func (s *Service) SaveOneNoteConfig(ctx context.Context, telegramID int64, notebookID, sectionID string) error {
@@ -134,26 +152,30 @@ func (s *Service) SaveOneNoteConfig(ctx context.Context, telegramID int64, noteb
 		SectionID:  sectionID,
 	}
 
-	return s.repo.UpdateOneNoteConfig(ctx, telegramID, config)
+	if err := s.repo.UpdateOneNoteConfig(ctx, telegramID, config); err != nil {
+		return fmt.Errorf("save OneNote config (telegram_id: %d, notebook_id: %s): %w", telegramID, notebookID, err)
+	}
+
+	return nil
 }
 
 func (s *Service) SyncPages(ctx context.Context, telegramID int64) (int, error) {
 	user, err := s.repo.GetUser(ctx, telegramID)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
 	}
 
 	if user.OneNoteAuth == nil || user.OneNoteConfig == nil {
-		return 0, fmt.Errorf("onenote not configured")
+		return 0, fmt.Errorf("onenote not configured (telegram_id: %d)", telegramID)
 	}
 
 	pages, err := s.oneNoteClient.GetPages(user.OneNoteAuth.AccessToken, user.OneNoteConfig.SectionID)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("get pages (telegram_id: %d, section_id: %s): %w", telegramID, user.OneNoteConfig.SectionID, err)
 	}
 
 	if err := s.repo.DeleteUserPages(ctx, telegramID); err != nil {
-		log.Printf("Error deleting old pages: %v", err)
+		zap.S().Error("delete user pages", zap.Error(err), zap.Int64("telegram_id", telegramID))
 	}
 
 	for i, page := range pages {
@@ -170,11 +192,16 @@ func (s *Service) SyncPages(ctx context.Context, telegramID int64) (int, error) 
 		}
 
 		if err := s.repo.CreatePageReference(ctx, pageRef); err != nil {
-			log.Printf("Error creating page reference: %v", err)
+			zap.S().Error("create page reference", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", page.ID))
 			continue
 		}
 
-		exists, _ := s.repo.ProgressExists(ctx, telegramID, page.ID)
+		exists, err := s.repo.ProgressExists(ctx, telegramID, page.ID)
+		if err != nil {
+			zap.S().Error("check progress exists", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", page.ID))
+			continue
+		}
+
 		if !exists {
 			nextReview, interval := srs.GetInitialReviewDate()
 			progress := &models.UserProgress{
@@ -187,7 +214,7 @@ func (s *Service) SyncPages(ctx context.Context, telegramID int64) (int, error) 
 			}
 
 			if err := s.repo.CreateProgress(ctx, progress); err != nil {
-				log.Printf("Error creating progress: %v", err)
+				zap.S().Error("create progress", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", page.ID))
 			}
 		}
 	}
@@ -206,20 +233,25 @@ func (s *Service) GetUserPages(ctx context.Context, telegramID int64) ([]*models
 func (s *Service) GetPageContent(ctx context.Context, telegramID int64, pageID string) (string, error) {
 	user, err := s.repo.GetUser(ctx, telegramID)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
 	}
 
 	if user.OneNoteAuth == nil {
-		return "", fmt.Errorf("onenote not connected")
+		return "", fmt.Errorf("onenote not connected (telegram_id: %d)", telegramID)
 	}
 
-	return s.oneNoteClient.GetPageContent(user.OneNoteAuth.AccessToken, pageID)
+	content, err := s.oneNoteClient.GetPageContent(user.OneNoteAuth.AccessToken, pageID)
+	if err != nil {
+		return "", fmt.Errorf("get page content (telegram_id: %d, page_id: %s): %w", telegramID, pageID, err)
+	}
+
+	return content, nil
 }
 
 func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pageID string, success bool) error {
 	progress, err := s.repo.GetProgress(ctx, telegramID, pageID)
 	if err != nil {
-		return err
+		return fmt.Errorf("get progress (telegram_id: %d, page_id: %s): %w", telegramID, pageID, err)
 	}
 
 	nextReview, newInterval := srs.CalculateNextReviewDate(progress.IntervalDays, success)
@@ -238,11 +270,11 @@ func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pa
 	}
 
 	if err := s.repo.UpdateProgress(ctx, telegramID, pageID, newRepCount, time.Now(), nextReview, newInterval); err != nil {
-		return err
+		return fmt.Errorf("update progress (telegram_id: %d, page_id: %s): %w", telegramID, pageID, err)
 	}
 
 	if err := s.repo.AddProgressHistory(ctx, telegramID, pageID, history); err != nil {
-		log.Printf("Error adding history: %v", err)
+		zap.S().Error("add progress history", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", pageID))
 	}
 
 	return nil

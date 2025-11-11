@@ -3,13 +3,13 @@ package handler
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/yourusername/master-english-srs/internal/models"
 	"github.com/yourusername/master-english-srs/pkg/onenote"
+	"go.uber.org/zap"
 )
 
 type Service interface {
@@ -39,7 +39,7 @@ type TelegramHandler struct {
 func NewTelegramHandler(token string, service Service) (*TelegramHandler, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create bot API: %w", err)
 	}
 
 	return &TelegramHandler{
@@ -73,7 +73,7 @@ func (h *TelegramHandler) Start() {
 
 	updates := h.api.GetUpdatesChan(u)
 
-	log.Println("Bot started...")
+	zap.S().Info("bot started")
 
 	go h.startReminderScheduler()
 
@@ -102,6 +102,7 @@ func (h *TelegramHandler) handleStart(ctx context.Context, update tgbotapi.Updat
 
 	exists, err := h.service.UserExists(ctx, userID)
 	if err != nil {
+		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
 		h.sendMessage(update.Message.Chat.ID, "Произошла ошибка. Попробуй позже.")
 		return
 	}
@@ -134,7 +135,7 @@ func (h *TelegramHandler) handleStart(ctx context.Context, update tgbotapi.Updat
 	h.sendMessageWithKeyboard(update.Message.Chat.ID, text, keyboard)
 
 	if err := h.service.RegisterUser(ctx, userID, username, "B1"); err != nil {
-		log.Printf("Error creating user: %v", err)
+		zap.S().Error("register user", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("username", username))
 	}
 
 	h.sendMessage(update.Message.Chat.ID, "Супер! Я запомнил.")
@@ -154,6 +155,7 @@ func (h *TelegramHandler) handleSync(ctx context.Context, update tgbotapi.Update
 
 	user, err := h.service.GetUser(ctx, userID)
 	if err != nil {
+		zap.S().Error("get user", zap.Error(err), zap.Int64("telegram_id", userID))
 		h.sendMessage(update.Message.Chat.ID, "Сначала зарегистрируйся с помощью /start")
 		return
 	}
@@ -172,6 +174,7 @@ func (h *TelegramHandler) handleSync(ctx context.Context, update tgbotapi.Update
 
 	count, err := h.service.SyncPages(ctx, userID)
 	if err != nil {
+		zap.S().Error("sync pages", zap.Error(err), zap.Int64("telegram_id", userID))
 		h.sendMessage(update.Message.Chat.ID, "Не удалось синхронизировать страницы.")
 		return
 	}
@@ -184,6 +187,7 @@ func (h *TelegramHandler) handleToday(ctx context.Context, update tgbotapi.Updat
 
 	duePages, err := h.service.GetDuePagesToday(ctx, userID)
 	if err != nil {
+		zap.S().Error("get due pages today", zap.Error(err), zap.Int64("telegram_id", userID))
 		h.sendMessage(update.Message.Chat.ID, "Произошла ошибка.")
 		return
 	}
@@ -193,7 +197,7 @@ func (h *TelegramHandler) handleToday(ctx context.Context, update tgbotapi.Updat
 		return
 	}
 
-	text := fmt.Sprintf("📚 Сегодня на повторение:\n\n")
+	text := "📚 Сегодня на повторение:\n\n"
 	var buttons [][]tgbotapi.InlineKeyboardButton
 
 	for i, pwp := range duePages {
@@ -234,6 +238,7 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 	for _, page := range pages {
 		progress, err := h.service.GetProgress(ctx, userID, page.PageID)
 		if err != nil {
+			zap.S().Error("get progress", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("page_id", page.PageID))
 			continue
 		}
 
@@ -282,7 +287,7 @@ func (h *TelegramHandler) handleLevelSelection(ctx context.Context, callback *tg
 	level := strings.TrimPrefix(callback.Data, "level_")
 
 	if err := h.service.UpdateUserLevel(ctx, callback.From.ID, level); err != nil {
-		log.Printf("Error updating level: %v", err)
+		zap.S().Error("update user level", zap.Error(err), zap.Int64("telegram_id", callback.From.ID), zap.String("level", level))
 		return
 	}
 
@@ -300,6 +305,7 @@ func (h *TelegramHandler) handleShowPage(ctx context.Context, callback *tgbotapi
 
 	content, err := h.service.GetPageContent(ctx, callback.From.ID, pageID)
 	if err != nil {
+		zap.S().Error("get page content", zap.Error(err), zap.Int64("telegram_id", callback.From.ID), zap.String("page_id", pageID))
 		h.sendMessage(callback.Message.Chat.ID, "Не удалось получить содержимое страницы.")
 		return
 	}
@@ -333,6 +339,7 @@ func (h *TelegramHandler) handleReviewFailure(ctx context.Context, callback *tgb
 
 func (h *TelegramHandler) updateReviewProgress(ctx context.Context, userID int64, chatID int64, pageID string, success bool) {
 	if err := h.service.UpdateReviewProgress(ctx, userID, pageID, success); err != nil {
+		zap.S().Error("update review progress", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("page_id", pageID), zap.Bool("success", success))
 		h.sendMessage(chatID, "Ошибка при обновлении прогресса.")
 		return
 	}
@@ -380,13 +387,14 @@ func (h *TelegramHandler) checkAndSendReminders() {
 
 	users, err := h.service.GetAllUsersForReminders(ctx)
 	if err != nil {
-		log.Printf("Error getting users for reminders: %v", err)
+		zap.S().Error("get all users for reminders", zap.Error(err))
 		return
 	}
 
 	for _, user := range users {
 		duePages, err := h.service.GetDuePagesToday(ctx, user.TelegramID)
 		if err != nil {
+			zap.S().Error("get due pages for reminder", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
 			continue
 		}
 

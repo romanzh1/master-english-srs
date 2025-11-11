@@ -29,7 +29,7 @@ func (c *Client) GetNotebooks(accessToken string) ([]Notebook, error) {
 
 	var response NotebooksResponse
 	if err := c.makeRequest(accessToken, url, &response); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get notebooks: %w", err)
 	}
 
 	return response.Value, nil
@@ -40,7 +40,7 @@ func (c *Client) GetSections(accessToken, notebookID string) ([]Section, error) 
 
 	var response SectionsResponse
 	if err := c.makeRequest(accessToken, url, &response); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get sections (notebook_id: %s): %w", notebookID, err)
 	}
 
 	return response.Value, nil
@@ -51,7 +51,7 @@ func (c *Client) GetPages(accessToken, sectionID string) ([]Page, error) {
 
 	var response PagesResponse
 	if err := c.makeRequest(accessToken, url, &response); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get pages (section_id: %s): %w", sectionID, err)
 	}
 
 	return response.Value, nil
@@ -62,25 +62,25 @@ func (c *Client) GetPageContent(accessToken, pageID string) (string, error) {
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("create request (page_id: %s): %w", pageID, err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("execute request (page_id: %s): %w", pageID, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("get page content failed: %s", string(body))
+		return "", fmt.Errorf("get page content (page_id: %s, status: %d): %s", pageID, resp.StatusCode, string(body))
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read response body (page_id: %s): %w", pageID, err)
 	}
 
 	content := c.extractTextFromHTML(string(bodyBytes))
@@ -90,24 +90,24 @@ func (c *Client) GetPageContent(accessToken, pageID string) (string, error) {
 func (c *Client) makeRequest(accessToken, url string, result interface{}) error {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("create request (url: %s): %w", url, err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("execute request (url: %s): %w", url, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("request failed: %s", string(body))
+		return fmt.Errorf("request failed (url: %s, status: %d): %s", url, resp.StatusCode, string(body))
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
-		return err
+		return fmt.Errorf("decode response (url: %s): %w", url, err)
 	}
 
 	return nil

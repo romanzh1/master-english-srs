@@ -19,7 +19,7 @@ type Postgres struct {
 func NewDB(dsn string, maxIdle, maxOpen int) (*Postgres, error) {
 	db, err := sqlx.Connect("pgx", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed connection: %w", err)
+		return nil, fmt.Errorf("connect to database: %w", err)
 	}
 
 	db.SetMaxIdleConns(maxIdle)
@@ -30,7 +30,7 @@ func NewDB(dsn string, maxIdle, maxOpen int) (*Postgres, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 	if err = db.PingContext(ctx); err != nil {
-		return nil, fmt.Errorf("failed ping: %w", err)
+		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
 	psql := squirrel.StatementBuilder.PlaceholderFormat(squirrel.Dollar)
@@ -43,12 +43,16 @@ func (r Postgres) Close() error {
 }
 
 func (r Postgres) Begin() (*sqlx.Tx, error) {
-	return r.db.Beginx()
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	return tx, nil
 }
 
 func (r Postgres) Reset(dir string) error {
 	if err := goose.Reset(r.db.DB, dir); err != nil {
-		return err
+		return fmt.Errorf("reset migrations (dir: %s): %w", dir, err)
 	}
 
 	return nil
@@ -56,7 +60,7 @@ func (r Postgres) Reset(dir string) error {
 
 func (r Postgres) Up(dir string) error {
 	if err := goose.Up(r.db.DB, dir); err != nil {
-		return err
+		return fmt.Errorf("run migrations (dir: %s): %w", dir, err)
 	}
 
 	return nil
