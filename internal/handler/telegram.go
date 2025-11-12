@@ -54,6 +54,10 @@ func (h *TelegramHandler) handleCommand(ctx context.Context, update tgbotapi.Upd
 		h.handleStart(ctx, update)
 	case "connect_onenote":
 		h.handleConnectOneNote(ctx, update)
+	case "select_notebook":
+		h.handleSelectNotebook(ctx, update)
+	case "select_section":
+		h.handleSelectSection(ctx, update)
 	case "today":
 		h.handleToday(ctx, update)
 	case "pages":
@@ -88,18 +92,32 @@ func (h *TelegramHandler) handleUpdate(update tgbotapi.Update) {
 	ctx := context.Background()
 
 	if update.Message != nil && update.Message.IsCommand() {
+		// Проверяем, что сообщение от пользователя (не от канала или группы)
+		if update.Message.From == nil {
+			zap.S().Warn("received command from nil user")
+			return
+		}
 		h.handleCommand(ctx, update)
 	} else if update.Message != nil {
+		// Проверяем, что сообщение от пользователя (не от канала или группы)
+		if update.Message.From == nil {
+			zap.S().Warn("received message from nil user")
+			return
+		}
 		// Обрабатываем текстовые сообщения (например, код авторизации)
 		h.handleTextMessage(ctx, update)
 	} else if update.CallbackQuery != nil {
+		// Проверяем, что callback от пользователя
+		if update.CallbackQuery.From == nil {
+			zap.S().Warn("received callback from nil user")
+			return
+		}
 		h.handleCallback(ctx, update)
 	}
 }
 
 func (h *TelegramHandler) handleStart(ctx context.Context, update tgbotapi.Update) {
 	userID := update.Message.From.ID
-	username := update.Message.From.UserName
 
 	exists, err := h.service.UserExists(ctx, userID)
 	if err != nil {
@@ -115,9 +133,9 @@ func (h *TelegramHandler) handleStart(ctx context.Context, update tgbotapi.Updat
 
 	text := `Привет! 👋
 
-		Я помогу тебе изучать английский по системе интервальных повторений (SRS).
-		
-		Выбери свой уровень:`
+Я помогу тебе изучать английский по системе интервальных повторений (SRS).
+
+Выбери свой уровень:`
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -134,35 +152,183 @@ func (h *TelegramHandler) handleStart(ctx context.Context, update tgbotapi.Updat
 	)
 
 	h.sendMessageWithKeyboard(update.Message.Chat.ID, text, keyboard)
-
-	if err := h.service.RegisterUser(ctx, userID, username, "B1"); err != nil {
-		zap.S().Error("register user", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("username", username))
-	}
-
-	h.sendMessage(update.Message.Chat.ID, "Супер! Я запомнил.")
 }
 
 func (h *TelegramHandler) handleConnectOneNote(ctx context.Context, update tgbotapi.Update) {
 	userID := update.Message.From.ID
+	chatID := update.Message.Chat.ID
+
+	exists, err := h.service.UserExists(ctx, userID)
+	if err != nil {
+		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	if !exists {
+		h.sendMessage(chatID, "Сначала зарегистрируйся с помощью команды /start")
+		return
+	}
 
 	authURL := h.service.GetAuthURL(userID)
 
 	text := fmt.Sprintf("Для подключения OneNote перейди по ссылке:\n\n%s\n\nПосле авторизации отправь мне полученный код.", authURL)
-	h.sendMessage(update.Message.Chat.ID, text)
+	h.sendMessage(chatID, text)
 }
 
-func (h *TelegramHandler) handleTextMessage(ctx context.Context, update tgbotapi.Update) {
+func (h *TelegramHandler) handleSelectNotebook(ctx context.Context, update tgbotapi.Update) {
 	userID := update.Message.From.ID
-	text := strings.TrimSpace(update.Message.Text)
+	chatID := update.Message.Chat.ID
 
-	// Проверяем, может ли это быть код авторизации (длина от 20 до 200 символов)
-	if len(text) < 20 || len(text) >= 200 {
+	exists, err := h.service.UserExists(ctx, userID)
+	if err != nil {
+		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	if !exists {
+		h.sendMessage(chatID, "Сначала зарегистрируйся с помощью команды /start")
 		return
 	}
 
 	user, err := h.service.GetUser(ctx, userID)
 	if err != nil {
-		// Пользователь не найден, игнорируем
+		zap.S().Error("get user", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	// Проверяем, что пользователь авторизован
+	if user.AccessToken == nil || user.RefreshToken == nil {
+		h.sendMessage(chatID, "Сначала подключи OneNote с помощью команды /connect_onenote")
+		return
+	}
+
+	notebooks, err := h.service.GetOneNoteNotebooks(ctx, userID)
+	if err != nil {
+		if h.handleAuthError(err, userID, chatID) {
+			return
+		}
+		zap.S().Error("get notebooks", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Не удалось получить список книг OneNote. Попробуй позже.")
+		return
+	}
+
+	if len(notebooks) == 0 {
+		h.sendMessage(chatID, "У тебя нет доступных книг OneNote.")
+		return
+	}
+
+	text := "📚 Выбери книгу OneNote для синхронизации:\n\n"
+	var buttons [][]tgbotapi.InlineKeyboardButton
+
+	for _, notebook := range notebooks {
+		button := tgbotapi.NewInlineKeyboardButtonData(
+			notebook.DisplayName,
+			fmt.Sprintf("notebook_%s", notebook.ID),
+		)
+		buttons = append(buttons, tgbotapi.NewInlineKeyboardRow(button))
+	}
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	h.sendMessageWithKeyboard(chatID, text, keyboard)
+}
+
+func (h *TelegramHandler) handleSelectSection(ctx context.Context, update tgbotapi.Update) {
+	userID := update.Message.From.ID
+	chatID := update.Message.Chat.ID
+
+	exists, err := h.service.UserExists(ctx, userID)
+	if err != nil {
+		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	if !exists {
+		h.sendMessage(chatID, "Сначала зарегистрируйся с помощью команды /start")
+		return
+	}
+
+	user, err := h.service.GetUser(ctx, userID)
+	if err != nil {
+		zap.S().Error("get user", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	// Проверяем, что пользователь авторизован
+	if user.AccessToken == nil || user.RefreshToken == nil {
+		h.sendMessage(chatID, "Сначала подключи OneNote с помощью команды /connect_onenote")
+		return
+	}
+
+	// Проверяем, что выбран notebook
+	if user.NotebookID == nil || *user.NotebookID == "" {
+		h.sendMessage(chatID, "Сначала выбери книгу OneNote с помощью команды /select_notebook")
+		return
+	}
+
+	sections, err := h.service.GetOneNoteSections(ctx, userID, *user.NotebookID)
+	if err != nil {
+		if h.handleAuthError(err, userID, chatID) {
+			return
+		}
+		zap.S().Error("get sections", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Не удалось получить список секций OneNote. Попробуй позже.")
+		return
+	}
+
+	if len(sections) == 0 {
+		h.sendMessage(chatID, "В выбранной книге нет доступных секций.")
+		return
+	}
+
+	text := "📑 Выбери секцию OneNote для синхронизации:\n\n"
+	var buttons [][]tgbotapi.InlineKeyboardButton
+
+	for _, section := range sections {
+		button := tgbotapi.NewInlineKeyboardButtonData(
+			section.DisplayName,
+			fmt.Sprintf("section_%s", section.ID),
+		)
+		buttons = append(buttons, tgbotapi.NewInlineKeyboardRow(button))
+	}
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	h.sendMessageWithKeyboard(chatID, text, keyboard)
+}
+
+func (h *TelegramHandler) handleTextMessage(ctx context.Context, update tgbotapi.Update) {
+	userID := update.Message.From.ID
+	text := strings.TrimSpace(update.Message.Text)
+	chatID := update.Message.Chat.ID
+
+	// Проверяем, может ли это быть код авторизации (длина от 20 до 200 символов)
+	if len(text) < 20 || len(text) >= 200 {
+		// Это не код авторизации - отправляем подсказку пользователю
+		h.sendMessage(chatID, "Я не понимаю эту команду. Используй /help для списка доступных команд.")
+		return
+	}
+
+	// Проверяем, существует ли пользователь
+	exists, err := h.service.UserExists(ctx, userID)
+	if err != nil {
+		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	if !exists {
+		h.sendMessage(chatID, "Сначала зарегистрируйся с помощью команды /start")
+		return
+	}
+
+	user, err := h.service.GetUser(ctx, userID)
+	if err != nil {
+		zap.S().Error("get user", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
 		return
 	}
 
@@ -175,17 +341,20 @@ func (h *TelegramHandler) handleTextMessage(ctx context.Context, update tgbotapi
 		// Если пользователь не авторизован, показываем ошибку
 		if !wasAuthorized {
 			zap.S().Error("exchange auth code", zap.Error(err), zap.Int64("telegram_id", userID))
-			h.sendMessage(update.Message.Chat.ID, "❌ Не удалось обработать код авторизации. Убедись, что код правильный и не истёк. Попробуй получить новый код через /connect_onenote")
+			h.sendMessage(chatID, "❌ Не удалось обработать код авторизации. Убедись, что код правильный и не истёк. Попробуй получить новый код через /connect_onenote")
+		} else {
+			// Если пользователь уже авторизован и код не подошёл, это не код авторизации
+			h.sendMessage(chatID, "Не удалось обработать код. Убедись, что код правильный и не истёк. Попробуй получить новый код через /connect_onenote")
 		}
-		// Если пользователь уже авторизован и код не подошёл, это не код авторизации - игнорируем
 		return
 	}
 
 	// После успешного обмена кода отправляем соответствующее сообщение
 	if wasAuthorized {
-		h.sendMessage(update.Message.Chat.ID, "✅ Авторизация обновлена!")
+		h.sendMessage(chatID, "✅ Авторизация обновлена!")
 	} else {
-		h.sendMessage(update.Message.Chat.ID, "✅ Авторизация успешна! Теперь используй /today для начала занятий.")
+		text := "✅ Авторизация успешна!\n\nТеперь выбери книгу OneNote с помощью /select_notebook, а затем секцию с помощью /select_section."
+		h.sendMessage(chatID, text)
 	}
 }
 
@@ -206,6 +375,19 @@ func (h *TelegramHandler) handleAuthError(err error, userID, chatID int64) bool 
 func (h *TelegramHandler) handleToday(ctx context.Context, update tgbotapi.Update) {
 	userID := update.Message.From.ID
 	chatID := update.Message.Chat.ID
+
+	// Проверяем, существует ли пользователь
+	exists, err := h.service.UserExists(ctx, userID)
+	if err != nil {
+		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	if !exists {
+		h.sendMessage(chatID, "Сначала зарегистрируйся с помощью команды /start")
+		return
+	}
 
 	duePages, err := h.service.GetDuePagesToday(ctx, userID)
 	if err != nil {
@@ -254,6 +436,19 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 	userID := update.Message.From.ID
 	chatID := update.Message.Chat.ID
 
+	// Проверяем, существует ли пользователь
+	exists, err := h.service.UserExists(ctx, userID)
+	if err != nil {
+		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	if !exists {
+		h.sendMessage(chatID, "Сначала зарегистрируйся с помощью команды /start")
+		return
+	}
+
 	pages, err := h.service.GetUserPages(ctx, userID)
 	if err != nil {
 		if h.handleAuthError(err, userID, chatID) {
@@ -281,21 +476,23 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 			page.PageNumber, page.Title, progress.RepetitionCount, progress.IntervalDays)
 	}
 
-	h.sendMessage(update.Message.Chat.ID, text)
+	h.sendMessage(chatID, text)
 }
 
 func (h *TelegramHandler) handleHelp(ctx context.Context, update tgbotapi.Update) {
 	text := `📚 *Master English SRS*
 
-		Доступные команды:
-		
-		/start - Начать работу с ботом
-		/connect_onenote - Подключить OneNote
-		/today - Показать страницы на сегодня
-		/pages - Список всех страниц
-		/help - Справка
+Доступные команды:
 
-		Примечание: Страницы синхронизируются автоматически при запросе.`
+/start - Начать работу с ботом
+/connect_onenote - Подключить OneNote
+/select_notebook - Выбрать книгу OneNote для синхронизации
+/select_section - Выбрать секцию OneNote для синхронизации
+/today - Показать страницы на сегодня
+/pages - Список всех страниц
+/help - Справка
+
+Примечание: Страницы синхронизируются автоматически при запросе.`
 
 	h.sendMessage(update.Message.Chat.ID, text)
 }
@@ -303,9 +500,14 @@ func (h *TelegramHandler) handleHelp(ctx context.Context, update tgbotapi.Update
 func (h *TelegramHandler) handleCallback(ctx context.Context, update tgbotapi.Update) {
 	callback := update.CallbackQuery
 	data := callback.Data
+	chatID := callback.Message.Chat.ID
 
 	if strings.HasPrefix(data, "level_") {
 		h.handleLevelSelection(ctx, callback)
+	} else if strings.HasPrefix(data, "notebook_") {
+		h.handleNotebookSelection(ctx, callback)
+	} else if strings.HasPrefix(data, "section_") {
+		h.handleSectionSelection(ctx, callback)
 	} else if strings.HasPrefix(data, "show_") {
 		h.handleShowPage(ctx, callback)
 	} else if strings.HasPrefix(data, "success_") {
@@ -314,21 +516,110 @@ func (h *TelegramHandler) handleCallback(ctx context.Context, update tgbotapi.Up
 		h.handleReviewFailure(ctx, callback)
 	} else if data == "skip_all" {
 		h.handleSkipAll(ctx, callback)
+	} else {
+		// Неизвестный callback - отправляем уведомление пользователю
+		zap.S().Warn("unknown callback data", zap.String("data", data), zap.Int64("user_id", callback.From.ID))
+		h.sendMessage(chatID, "Неизвестная команда. Используй /help для списка доступных команд.")
 	}
 
-	h.api.Send(tgbotapi.NewCallback(callback.ID, ""))
+	// Всегда отвечаем на callback, чтобы убрать индикатор загрузки
+	callbackConfig := tgbotapi.NewCallback(callback.ID, "")
+	if _, err := h.api.Request(callbackConfig); err != nil {
+		zap.S().Error("send callback answer", zap.Error(err), zap.String("callback_id", callback.ID))
+	}
 }
 
 func (h *TelegramHandler) handleLevelSelection(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	userID := callback.From.ID
+	username := callback.From.UserName
 	level := strings.TrimPrefix(callback.Data, "level_")
+	chatID := callback.Message.Chat.ID
 
-	if err := h.service.UpdateUserLevel(ctx, callback.From.ID, level); err != nil {
-		zap.S().Error("update user level", zap.Error(err), zap.Int64("telegram_id", callback.From.ID), zap.String("level", level))
+	// Проверяем, существует ли пользователь
+	exists, err := h.service.UserExists(ctx, userID)
+	if err != nil {
+		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
 		return
 	}
 
-	text := fmt.Sprintf("✅ Уровень установлен: %s\n\nТеперь подключи OneNote с помощью /connect_onenote", level)
-	h.sendMessage(callback.Message.Chat.ID, text)
+	if !exists {
+		// Регистрируем нового пользователя с выбранным уровнем
+		if err := h.service.RegisterUser(ctx, userID, username, level); err != nil {
+			zap.S().Error("register user", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("username", username), zap.String("level", level))
+			h.sendMessage(chatID, "Произошла ошибка при регистрации. Попробуй позже.")
+			return
+		}
+		text := fmt.Sprintf("✅ Регистрация завершена! Уровень установлен: %s\n\nТеперь подключи OneNote с помощью /connect_onenote", level)
+		h.sendMessage(chatID, text)
+	} else {
+		// Обновляем уровень существующего пользователя
+		if err := h.service.UpdateUserLevel(ctx, userID, level); err != nil {
+			zap.S().Error("update user level", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("level", level))
+			h.sendMessage(chatID, "Произошла ошибка при обновлении уровня. Попробуй позже.")
+			return
+		}
+		text := fmt.Sprintf("✅ Уровень обновлён: %s\n\nТеперь подключи OneNote с помощью /connect_onenote", level)
+		h.sendMessage(chatID, text)
+	}
+}
+
+func (h *TelegramHandler) handleNotebookSelection(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	userID := callback.From.ID
+	notebookID := strings.TrimPrefix(callback.Data, "notebook_")
+	chatID := callback.Message.Chat.ID
+
+	// Получаем пользователя, чтобы узнать текущий sectionID (если есть)
+	user, err := h.service.GetUser(ctx, userID)
+	if err != nil {
+		zap.S().Error("get user", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	// Сохраняем только notebookID, sectionID оставляем как есть (или nil, если его нет)
+	sectionID := ""
+	if user.SectionID != nil {
+		sectionID = *user.SectionID
+	}
+
+	if err := h.service.SaveOneNoteConfig(ctx, userID, notebookID, sectionID); err != nil {
+		zap.S().Error("save notebook config", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("notebook_id", notebookID))
+		h.sendMessage(chatID, "Не удалось сохранить выбранную книгу. Попробуй позже.")
+		return
+	}
+
+	text := "✅ Книга OneNote выбрана!\n\nТеперь выбери секцию с помощью команды /select_section"
+	h.sendMessage(chatID, text)
+}
+
+func (h *TelegramHandler) handleSectionSelection(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	userID := callback.From.ID
+	sectionID := strings.TrimPrefix(callback.Data, "section_")
+	chatID := callback.Message.Chat.ID
+
+	// Получаем пользователя, чтобы узнать текущий notebookID
+	user, err := h.service.GetUser(ctx, userID)
+	if err != nil {
+		zap.S().Error("get user", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	// Проверяем, что выбран notebook
+	if user.NotebookID == nil || *user.NotebookID == "" {
+		h.sendMessage(chatID, "Сначала выбери книгу OneNote с помощью команды /select_notebook")
+		return
+	}
+
+	if err := h.service.SaveOneNoteConfig(ctx, userID, *user.NotebookID, sectionID); err != nil {
+		zap.S().Error("save section config", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("section_id", sectionID))
+		h.sendMessage(chatID, "Не удалось сохранить выбранную секцию. Попробуй позже.")
+		return
+	}
+
+	text := "✅ Секция OneNote выбрана!\n\nТеперь OneNote настроен. Используй /today для начала занятий."
+	h.sendMessage(chatID, text)
 }
 
 func (h *TelegramHandler) handleShowPage(ctx context.Context, callback *tgbotapi.CallbackQuery) {
@@ -398,15 +689,21 @@ func (h *TelegramHandler) handleSkipAll(ctx context.Context, callback *tgbotapi.
 
 func (h *TelegramHandler) sendMessage(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "Markdown"
-	h.api.Send(msg)
+	// Используем Markdown для форматирования текста (жирный шрифт через *)
+	msg.ParseMode = tgbotapi.ModeMarkdown
+	if _, err := h.api.Send(msg); err != nil {
+		zap.S().Error("send message", zap.Error(err), zap.Int64("chat_id", chatID))
+	}
 }
 
 func (h *TelegramHandler) sendMessageWithKeyboard(chatID int64, text string, keyboard interface{}) {
 	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "Markdown"
+	// Используем Markdown для форматирования текста (жирный шрифт через *)
+	msg.ParseMode = tgbotapi.ModeMarkdown
 	msg.ReplyMarkup = keyboard
-	h.api.Send(msg)
+	if _, err := h.api.Send(msg); err != nil {
+		zap.S().Error("send message with keyboard", zap.Error(err), zap.Int64("chat_id", chatID))
+	}
 }
 
 func (h *TelegramHandler) startReminderScheduler() {
