@@ -35,7 +35,6 @@ type PageReference struct {
 	PageID     string    `db:"page_id"`
 	UserID     int64     `db:"user_id"`
 	Title      string    `db:"title"`
-	PageNumber int       `db:"page_number"`
 	Category   string    `db:"category"`
 	Level      string    `db:"level"`
 	Source     string    `db:"source"`

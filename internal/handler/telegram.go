@@ -18,16 +18,19 @@ type Service interface {
 	GetUser(ctx context.Context, telegramID int64) (*models.User, error)
 	UserExists(ctx context.Context, telegramID int64) (bool, error)
 	UpdateUserLevel(ctx context.Context, telegramID int64, level string) error
+	GetAllUsersForReminders(ctx context.Context) ([]*models.User, error)
+
 	GetAuthURL(telegramID int64) string
 	ExchangeAuthCode(ctx context.Context, telegramID int64, code string) error
+
 	GetOneNoteNotebooks(ctx context.Context, telegramID int64) ([]onenote.Notebook, error)
 	GetOneNoteSections(ctx context.Context, telegramID int64, notebookID string) ([]onenote.Section, error)
 	SaveOneNoteConfig(ctx context.Context, telegramID int64, notebookID, sectionID string) error
+
 	GetDuePagesToday(ctx context.Context, telegramID int64) ([]*models.PageWithProgress, error)
 	GetUserPages(ctx context.Context, telegramID int64) ([]*models.PageReference, error)
 	GetPageContent(ctx context.Context, telegramID int64, pageID string) (string, error)
 	UpdateReviewProgress(ctx context.Context, telegramID int64, pageID string, success bool) error
-	GetAllUsersForReminders(ctx context.Context) ([]*models.User, error)
 	GetProgress(ctx context.Context, telegramID int64, pageID string) (*models.UserProgress, error)
 }
 
@@ -409,12 +412,14 @@ func (h *TelegramHandler) handleToday(ctx context.Context, update tgbotapi.Updat
 
 	for i, pwp := range duePages {
 		daysSince := int(time.Since(pwp.Progress.LastReviewDate).Hours() / 24)
+		// Экранируем название страницы для безопасной вставки в HTML
+		escapedTitle := escapeHTML(pwp.Page.Title)
 		if pwp.Progress.RepetitionCount == 0 {
-			text += fmt.Sprintf("%d. Страница #%d: \"%s\"\n   📅 Новая страница\n   📊 Прогресс: %d повторений\n\n",
-				i+1, pwp.Page.PageNumber, pwp.Page.Title, pwp.Progress.RepetitionCount)
+			text += fmt.Sprintf("%d. \"%s\"\n   📅 Новая страница\n   📊 Прогресс: %d повторений\n\n",
+				i+1, escapedTitle, pwp.Progress.RepetitionCount)
 		} else {
-			text += fmt.Sprintf("%d. Страница #%d: \"%s\"\n   📅 Последнее повторение: %d дней назад\n   📊 Прогресс: %d повторений\n\n",
-				i+1, pwp.Page.PageNumber, pwp.Page.Title, daysSince, pwp.Progress.RepetitionCount)
+			text += fmt.Sprintf("%d. \"%s\"\n   📅 Последнее повторение: %d дней назад\n   📊 Прогресс: %d повторений\n\n",
+				i+1, escapedTitle, daysSince, pwp.Progress.RepetitionCount)
 		}
 
 		button := tgbotapi.NewInlineKeyboardButtonData(
@@ -472,27 +477,29 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 			continue
 		}
 
-		text += fmt.Sprintf("%d. %s\n   Повторений: %d | Интервал: %d дней\n\n",
-			page.PageNumber, page.Title, progress.RepetitionCount, progress.IntervalDays)
+		// Экранируем название страницы для безопасной вставки в HTML
+		escapedTitle := escapeHTML(page.Title)
+		text += fmt.Sprintf("• %s\n   Повторений: %d | Интервал: %d дней\n\n",
+			escapedTitle, progress.RepetitionCount, progress.IntervalDays)
 	}
 
 	h.sendMessage(chatID, text)
 }
 
 func (h *TelegramHandler) handleHelp(ctx context.Context, update tgbotapi.Update) {
-	text := `📚 *Master English SRS*
+	text := `📚 <b>Master English SRS</b>
 
-Доступные команды:
+		Доступные команды:
 
-/start - Начать работу с ботом
-/connect_onenote - Подключить OneNote
-/select_notebook - Выбрать книгу OneNote для синхронизации
-/select_section - Выбрать секцию OneNote для синхронизации
-/today - Показать страницы на сегодня
-/pages - Список всех страниц
-/help - Справка
+		/start - Начать работу с ботом
+		/connect_onenote - Подключить OneNote
+		/select_notebook - Выбрать книгу OneNote для синхронизации
+		/select_section - Выбрать секцию OneNote для синхронизации
+		/today - Показать страницы на сегодня
+		/pages - Список всех страниц
+		/help - Справка
 
-Примечание: Страницы синхронизируются автоматически при запросе.`
+		Примечание: Страницы синхронизируются автоматически при запросе.`
 
 	h.sendMessage(update.Message.Chat.ID, text)
 }
@@ -637,7 +644,9 @@ func (h *TelegramHandler) handleShowPage(ctx context.Context, callback *tgbotapi
 		return
 	}
 
-	text := fmt.Sprintf("📄 *Страница*\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n%s\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n", content)
+	// Экранируем содержимое страницы для безопасной вставки в HTML
+	escapedContent := escapeHTML(content)
+	text := fmt.Sprintf("📄 <b>Страница</b>\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n%s\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n", escapedContent)
 	text += "💡 Скопируй эту страницу и отправь в бота Poe для генерации задания.\n\n"
 	text += "После прохождения задания отметь результат:"
 
@@ -687,10 +696,20 @@ func (h *TelegramHandler) handleSkipAll(ctx context.Context, callback *tgbotapi.
 	h.sendMessage(callback.Message.Chat.ID, "Хорошо, пропускаем на сегодня. Увидимся завтра! 👋")
 }
 
+// escapeHTML экранирует специальные символы HTML для безопасной вставки в HTML-текст
+func escapeHTML(text string) string {
+	// Экранируем только три символа: &, <, >
+	// Важно: сначала экранируем &, чтобы не экранировать уже экранированные символы
+	text = strings.ReplaceAll(text, "&", "&amp;")
+	text = strings.ReplaceAll(text, "<", "&lt;")
+	text = strings.ReplaceAll(text, ">", "&gt;")
+	return text
+}
+
 func (h *TelegramHandler) sendMessage(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
-	// Используем Markdown для форматирования текста (жирный шрифт через *)
-	msg.ParseMode = tgbotapi.ModeMarkdown
+	// Используем HTML для форматирования текста (жирный шрифт через <b>текст</b>)
+	msg.ParseMode = tgbotapi.ModeHTML
 	if _, err := h.api.Send(msg); err != nil {
 		zap.S().Error("send message", zap.Error(err), zap.Int64("chat_id", chatID))
 	}
@@ -698,8 +717,8 @@ func (h *TelegramHandler) sendMessage(chatID int64, text string) {
 
 func (h *TelegramHandler) sendMessageWithKeyboard(chatID int64, text string, keyboard interface{}) {
 	msg := tgbotapi.NewMessage(chatID, text)
-	// Используем Markdown для форматирования текста (жирный шрифт через *)
-	msg.ParseMode = tgbotapi.ModeMarkdown
+	// Используем HTML для форматирования текста (жирный шрифт через <b>текст</b>)
+	msg.ParseMode = tgbotapi.ModeHTML
 	msg.ReplyMarkup = keyboard
 	if _, err := h.api.Send(msg); err != nil {
 		zap.S().Error("send message with keyboard", zap.Error(err), zap.Int64("chat_id", chatID))

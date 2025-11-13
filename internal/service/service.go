@@ -1,8 +1,12 @@
 package service
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,7 +30,6 @@ type Repository interface {
 	GetPageReference(ctx context.Context, pageID string, userID int64) (*models.PageReference, error)
 	GetUserPages(ctx context.Context, userID int64) ([]*models.PageReference, error)
 	DeleteUserPages(ctx context.Context, userID int64) error
-	GetMaxPageNumber(ctx context.Context, userID int64) (int, error)
 
 	CreateProgress(ctx context.Context, progress *models.UserProgress) error
 	GetProgress(ctx context.Context, userID int64, pageID string) (*models.UserProgress, error)
@@ -269,12 +272,16 @@ func (s *Service) syncPagesInternal(ctx context.Context, telegramID int64) (int,
 		zap.S().Error("delete user pages", zap.Error(err), zap.Int64("telegram_id", telegramID))
 	}
 
-	for i, page := range pages {
+	for _, page := range pages {
+		// Пропускаем страницы с * в заголовке (страницы на доработке)
+		if strings.Contains(page.Title, "*") {
+			continue
+		}
+
 		pageRef := &models.PageReference{
 			PageID:     page.ID,
 			UserID:     telegramID,
 			Title:      page.Title,
-			PageNumber: i + 1,
 			Category:   "vocabulary",
 			Level:      user.Level,
 			Source:     "onenote",
@@ -350,31 +357,97 @@ func isAuthError(err error) bool {
 }
 
 func (s *Service) GetDuePagesToday(ctx context.Context, telegramID int64) ([]*models.PageWithProgress, error) {
-	// Синхронизируем страницы перед получением списка для повторения
 	_, err := s.syncPagesInternal(ctx, telegramID)
 	if err != nil {
-		// Если ошибка авторизации, возвращаем её, иначе просто логируем и продолжаем
 		if _, ok := err.(*AuthRequiredError); ok {
-			return nil, err
+			return nil, fmt.Errorf("sync pages (telegram_id: %d): %w", telegramID, err)
 		}
 		zap.S().Warn("failed to sync pages before getting due pages", zap.Error(err), zap.Int64("telegram_id", telegramID))
 	}
 
-	return s.repo.GetDuePagesToday(ctx, telegramID)
+	duePages, err := s.repo.GetDuePagesToday(ctx, telegramID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Фильтруем страницы с * в заголовке (страницы на доработке)
+	filteredPages := make([]*models.PageWithProgress, 0, len(duePages))
+	for _, pwp := range duePages {
+		if !strings.Contains(pwp.Page.Title, "*") {
+			filteredPages = append(filteredPages, pwp)
+		}
+	}
+
+	// Сортируем по номеру из заголовка, затем по дате следующего повторения
+	slices.SortFunc(filteredPages, func(a, b *models.PageWithProgress) int {
+		numA := extractPageNumber(a.Page.Title)
+		numB := extractPageNumber(b.Page.Title)
+		if numA != numB {
+			return cmp.Compare(numA, numB)
+		}
+		// Если номера одинаковые, сортируем по дате следующего повторения
+		return a.Progress.NextReviewDate.Compare(b.Progress.NextReviewDate)
+	})
+
+	return filteredPages, nil
 }
 
 func (s *Service) GetUserPages(ctx context.Context, telegramID int64) ([]*models.PageReference, error) {
-	// Синхронизируем страницы перед получением списка
 	_, err := s.syncPagesInternal(ctx, telegramID)
 	if err != nil {
-		// Если ошибка авторизации, возвращаем её, иначе просто логируем и продолжаем
 		if _, ok := err.(*AuthRequiredError); ok {
-			return nil, err
+			return nil, fmt.Errorf("sync pages (telegram_id: %d): %w", telegramID, err)
 		}
 		zap.S().Warn("failed to sync pages before getting user pages", zap.Error(err), zap.Int64("telegram_id", telegramID))
 	}
 
-	return s.repo.GetUserPages(ctx, telegramID)
+	pages, err := s.repo.GetUserPages(ctx, telegramID)
+	if err != nil {
+		return nil, fmt.Errorf("get user pages (telegram_id: %d): %w", telegramID, err)
+	}
+
+	// Фильтруем страницы с * в заголовке (страницы на доработке)
+	filteredPages := make([]*models.PageReference, 0, len(pages))
+	for _, page := range pages {
+		if !strings.Contains(page.Title, "*") {
+			filteredPages = append(filteredPages, page)
+		}
+	}
+
+	// Сортируем по номеру из заголовка
+	slices.SortFunc(filteredPages, func(a, b *models.PageReference) int {
+		numA := extractPageNumber(a.Title)
+		numB := extractPageNumber(b.Title)
+		return cmp.Compare(numA, numB)
+	})
+
+	return filteredPages, nil
+}
+
+// extractPageNumber извлекает первое число из начала заголовка страницы
+// Например, "14 Grammar Sequence of Tenses" -> 14
+// Если число не найдено, возвращает максимальное значение int для сортировки в конец
+func extractPageNumber(title string) int {
+	// Удаляем пробелы в начале
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return 0
+	}
+
+	// Ищем первое число в начале строки
+	re := regexp.MustCompile(`^\d+`)
+	match := re.FindString(title)
+	if match == "" {
+		// Если число не найдено, возвращаем максимальное значение для сортировки в конец
+		return 999999
+	}
+
+	num, err := strconv.Atoi(match)
+	if err != nil {
+		return 999999
+	}
+
+	return num
 }
 
 func (s *Service) GetPageContent(ctx context.Context, telegramID int64, pageID string) (string, error) {

@@ -99,7 +99,7 @@ func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64) ([]*models
 
 	query := `
 		SELECT 
-			pr.page_id, pr.user_id, pr.title, pr.page_number, pr.category, pr.level, pr.source, pr.created_at, pr.last_synced,
+			pr.page_id, pr.user_id, pr.title, pr.category, pr.level, pr.source, pr.created_at, pr.last_synced,
 			up.repetition_count, up.last_review_date, up.next_review_date, up.interval_days, up.success_rate
 		FROM page_references pr
 		JOIN user_progress up ON pr.page_id = up.page_id AND pr.user_id = up.user_id
@@ -122,7 +122,6 @@ func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64) ([]*models
 			&pwp.Page.PageID,
 			&pwp.Page.UserID,
 			&pwp.Page.Title,
-			&pwp.Page.PageNumber,
 			&pwp.Page.Category,
 			&pwp.Page.Level,
 			&pwp.Page.Source,
