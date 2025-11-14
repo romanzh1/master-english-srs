@@ -47,7 +47,7 @@ func (c *Client) GetSections(accessToken, notebookID string) ([]Section, error) 
 }
 
 func (c *Client) GetPages(accessToken, sectionID string) ([]Page, error) {
-	url := fmt.Sprintf("%s/me/onenote/sections/%s/pages", graphAPIBase, sectionID)
+	url := fmt.Sprintf("%s/me/onenote/sections/%s/pages?$select=id,title,lastModifiedDateTime,createdDateTime", graphAPIBase, sectionID)
 
 	var response PagesResponse
 	if err := c.makeRequest(accessToken, url, &response); err != nil {

@@ -12,12 +12,13 @@ type User struct {
 	ReminderTime   string         `db:"reminder_time"`
 	CreatedAt      time.Time      `db:"created_at"`
 
-	AccessToken  *string    `db:"onenote_access_token"`
-	RefreshToken *string    `db:"onenote_refresh_token"`
-	ExpiresAt    *time.Time `db:"onenote_expires_at"`
-	AuthCode     *string    `db:"onenote_auth_code"`
-	NotebookID   *string    `db:"onenote_notebook_id"`
-	SectionID    *string    `db:"onenote_section_id"`
+	AccessToken    *string    `db:"onenote_access_token"`
+	RefreshToken   *string    `db:"onenote_refresh_token"`
+	ExpiresAt      *time.Time `db:"onenote_expires_at"`
+	AuthCode       *string    `db:"onenote_auth_code"`
+	NotebookID     *string    `db:"onenote_notebook_id"`
+	SectionID      *string    `db:"onenote_section_id"`
+	MaxPagesPerDay *uint      `db:"max_pages_per_day"`
 }
 
 type OneNoteAuth struct {
@@ -32,19 +33,18 @@ type OneNoteConfig struct {
 }
 
 type PageReference struct {
-	PageID     string    `db:"page_id"`
-	UserID     int64     `db:"user_id"`
-	Title      string    `db:"title"`
-	Category   string    `db:"category"`
-	Level      string    `db:"level"`
-	Source     string    `db:"source"`
-	CreatedAt  time.Time `db:"created_at"`
-	LastSynced time.Time `db:"last_synced"`
+	PageID    string     `db:"page_id"`
+	UserID    int64      `db:"user_id"`
+	Title     string     `db:"title"`
+	Source    string     `db:"source"`
+	CreatedAt time.Time  `db:"created_at"`
+	UpdatedAt *time.Time `db:"updated_at"`
 }
 
 type UserProgress struct {
 	UserID          int64             `db:"user_id"`
 	PageID          string            `db:"page_id"`
+	Level           string            `db:"level"`
 	RepetitionCount int               `db:"repetition_count"`
 	LastReviewDate  time.Time         `db:"last_review_date"`
 	NextReviewDate  time.Time         `db:"next_review_date"`
@@ -54,11 +54,10 @@ type UserProgress struct {
 }
 
 type ProgressHistory struct {
-	Date   time.Time `db:"date"`
-	Score  int       `db:"score"`
-	Passed bool      `db:"passed"`
-	Mode   string    `db:"mode"`
-	Notes  string    `db:"notes"`
+	Date  time.Time `db:"date"`
+	Score int       `db:"score"`
+	Mode  string    `db:"mode"`
+	Notes string    `db:"notes"`
 }
 
 type PageWithProgress struct {

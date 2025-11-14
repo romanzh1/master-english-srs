@@ -2,17 +2,17 @@ package repository
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"time"
 
+	"github.com/Masterminds/squirrel"
 	"github.com/yourusername/master-english-srs/internal/models"
 )
 
 func (r Postgres) CreateProgress(ctx context.Context, progress *models.UserProgress) error {
 	query := r.psql.Insert("user_progress").
-		Columns("user_id", "page_id", "repetition_count", "last_review_date", "next_review_date", "interval_days", "success_rate").
-		Values(progress.UserID, progress.PageID, progress.RepetitionCount, progress.LastReviewDate, progress.NextReviewDate, progress.IntervalDays, progress.SuccessRate)
+		Columns("user_id", "page_id", "level", "repetition_count", "last_review_date", "next_review_date", "interval_days", "success_rate").
+		Values(progress.UserID, progress.PageID, progress.Level, progress.RepetitionCount, progress.LastReviewDate, progress.NextReviewDate, progress.IntervalDays, progress.SuccessRate)
 
 	sql, args, err := query.ToSql()
 	if err != nil {
@@ -28,37 +28,23 @@ func (r Postgres) CreateProgress(ctx context.Context, progress *models.UserProgr
 
 func (r Postgres) GetProgress(ctx context.Context, userID int64, pageID string) (*models.UserProgress, error) {
 	query := `
-		SELECT user_id, page_id, repetition_count, last_review_date, next_review_date, interval_days, success_rate
+		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate
 		FROM user_progress
 		WHERE user_id = $1 AND page_id = $2
 	`
 
 	var progress models.UserProgress
-	var lastReview sql.NullTime
-
-	err := r.db.QueryRowContext(ctx, query, userID, pageID).Scan(
-		&progress.UserID,
-		&progress.PageID,
-		&progress.RepetitionCount,
-		&lastReview,
-		&progress.NextReviewDate,
-		&progress.IntervalDays,
-		&progress.SuccessRate,
-	)
-
+	err := r.db.GetContext(ctx, &progress, query, userID, pageID)
 	if err != nil {
 		return nil, fmt.Errorf("get progress (user_id: %d, page_id: %s): %w", userID, pageID, err)
-	}
-
-	if lastReview.Valid {
-		progress.LastReviewDate = lastReview.Time
 	}
 
 	return &progress, nil
 }
 
-func (r Postgres) UpdateProgress(ctx context.Context, userID int64, pageID string, repetitionCount int, lastReviewDate, nextReviewDate time.Time, intervalDays int) error {
+func (r Postgres) UpdateProgress(ctx context.Context, userID int64, pageID string, level string, repetitionCount int, lastReviewDate, nextReviewDate time.Time, intervalDays int) error {
 	query := r.psql.Update("user_progress").
+		Set("level", level).
 		Set("repetition_count", repetitionCount).
 		Set("last_review_date", lastReviewDate).
 		Set("next_review_date", nextReviewDate).
@@ -79,8 +65,8 @@ func (r Postgres) UpdateProgress(ctx context.Context, userID int64, pageID strin
 
 func (r Postgres) AddProgressHistory(ctx context.Context, userID int64, pageID string, history models.ProgressHistory) error {
 	query := r.psql.Insert("progress_history").
-		Columns("user_id", "page_id", "date", "score", "passed", "mode", "notes").
-		Values(userID, pageID, history.Date, history.Score, history.Passed, history.Mode, history.Notes)
+		Columns("user_id", "page_id", "date", "score", "mode", "notes").
+		Values(userID, pageID, history.Date, history.Score, history.Mode, history.Notes)
 
 	sql, args, err := query.ToSql()
 	if err != nil {
@@ -94,70 +80,23 @@ func (r Postgres) AddProgressHistory(ctx context.Context, userID int64, pageID s
 	return nil
 }
 
-func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64) ([]*models.PageWithProgress, error) {
+func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64) ([]*models.UserProgress, error) {
 	now := time.Now().Truncate(24 * time.Hour).Add(24 * time.Hour)
 
 	query := `
-		SELECT 
-			pr.page_id, pr.user_id, pr.title, pr.category, pr.level, pr.source, pr.created_at, pr.last_synced,
-			up.repetition_count, up.last_review_date, up.next_review_date, up.interval_days, up.success_rate
-		FROM page_references pr
-		JOIN user_progress up ON pr.page_id = up.page_id AND pr.user_id = up.user_id
-		WHERE pr.user_id = $1 AND up.next_review_date <= $2
-		ORDER BY up.next_review_date ASC
+		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate
+		FROM user_progress
+		WHERE user_id = $1 AND next_review_date <= $2
+		ORDER BY next_review_date ASC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, userID, now)
+	var progressList []*models.UserProgress
+	err := r.db.SelectContext(ctx, &progressList, query, userID, now)
 	if err != nil {
 		return nil, fmt.Errorf("query due pages (user_id: %d, cutoff_time: %s): %w", userID, now.Format(time.RFC3339), err)
 	}
-	defer rows.Close()
 
-	var result []*models.PageWithProgress
-	for rows.Next() {
-		var pwp models.PageWithProgress
-		var lastReview sql.NullTime
-
-		err := rows.Scan(
-			&pwp.Page.PageID,
-			&pwp.Page.UserID,
-			&pwp.Page.Title,
-			&pwp.Page.Category,
-			&pwp.Page.Level,
-			&pwp.Page.Source,
-			&pwp.Page.CreatedAt,
-			&pwp.Page.LastSynced,
-			&pwp.Progress.RepetitionCount,
-			&lastReview,
-			&pwp.Progress.NextReviewDate,
-			&pwp.Progress.IntervalDays,
-			&pwp.Progress.SuccessRate,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("scan page with progress row (user_id: %d): %w", userID, err)
-		}
-
-		pwp.Progress = &models.UserProgress{
-			UserID:          pwp.Page.UserID,
-			PageID:          pwp.Page.PageID,
-			RepetitionCount: pwp.Progress.RepetitionCount,
-			NextReviewDate:  pwp.Progress.NextReviewDate,
-			IntervalDays:    pwp.Progress.IntervalDays,
-			SuccessRate:     pwp.Progress.SuccessRate,
-		}
-
-		if lastReview.Valid {
-			pwp.Progress.LastReviewDate = lastReview.Time
-		}
-
-		result = append(result, &pwp)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate due pages rows (user_id: %d): %w", userID, err)
-	}
-
-	return result, nil
+	return progressList, nil
 }
 
 func (r Postgres) ProgressExists(ctx context.Context, userID int64, pageID string) (bool, error) {
@@ -174,4 +113,52 @@ func (r Postgres) ProgressExists(ctx context.Context, userID int64, pageID strin
 		return false, fmt.Errorf("check progress exists (user_id: %d, page_id: %s): %w", userID, pageID, err)
 	}
 	return count > 0, nil
+}
+
+func (r Postgres) GetAllProgressPageIDs(ctx context.Context, userID int64) ([]string, error) {
+	query := `SELECT page_id FROM user_progress WHERE user_id = $1`
+
+	var pageIDs []string
+	err := r.db.SelectContext(ctx, &pageIDs, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("query all progress page IDs (user_id: %d): %w", userID, err)
+	}
+
+	return pageIDs, nil
+}
+
+func (r Postgres) GetPageIDsNotInProgress(ctx context.Context, userID int64, pageIDs []string) ([]string, error) {
+	if len(pageIDs) == 0 {
+		return pageIDs, nil
+	}
+
+	query := r.psql.Select("page_id").
+		From("user_progress").
+		Where("user_id = ?", userID).
+		Where(squirrel.Eq{"page_id": pageIDs})
+
+	sql, args, err := query.ToSql()
+	if err != nil {
+		return nil, fmt.Errorf("build SQL query (user_id: %d): %w", userID, err)
+	}
+
+	var existingPageIDs []string
+	err = r.db.SelectContext(ctx, &existingPageIDs, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query existing page IDs (user_id: %d): %w", userID, err)
+	}
+
+	existingMap := make(map[string]bool, len(existingPageIDs))
+	for _, id := range existingPageIDs {
+		existingMap[id] = true
+	}
+
+	var notInProgress []string
+	for _, id := range pageIDs {
+		if !existingMap[id] {
+			notInProgress = append(notInProgress, id)
+		}
+	}
+
+	return notInProgress, nil
 }

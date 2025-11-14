@@ -9,8 +9,8 @@ import (
 
 func (r Postgres) CreatePageReference(ctx context.Context, page *models.PageReference) error {
 	query := r.psql.Insert("page_references").
-		Columns("page_id", "user_id", "title", "category", "level", "source", "created_at", "last_synced").
-		Values(page.PageID, page.UserID, page.Title, page.Category, page.Level, page.Source, page.CreatedAt, page.LastSynced)
+		Columns("page_id", "user_id", "title", "source", "created_at", "updated_at").
+		Values(page.PageID, page.UserID, page.Title, page.Source, page.CreatedAt, page.UpdatedAt)
 
 	sql, args, err := query.ToSql()
 	if err != nil {
@@ -26,23 +26,13 @@ func (r Postgres) CreatePageReference(ctx context.Context, page *models.PageRefe
 
 func (r Postgres) GetPageReference(ctx context.Context, pageID string, userID int64) (*models.PageReference, error) {
 	query := `
-		SELECT page_id, user_id, title, category, level, source, created_at, last_synced
+		SELECT page_id, user_id, title, source, created_at, updated_at
 		FROM page_references
 		WHERE page_id = $1 AND user_id = $2
 	`
 
 	var page models.PageReference
-	err := r.db.QueryRowContext(ctx, query, pageID, userID).Scan(
-		&page.PageID,
-		&page.UserID,
-		&page.Title,
-		&page.Category,
-		&page.Level,
-		&page.Source,
-		&page.CreatedAt,
-		&page.LastSynced,
-	)
-
+	err := r.db.GetContext(ctx, &page, query, pageID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get page reference (page_id: %s, user_id: %d): %w", pageID, userID, err)
 	}
@@ -51,39 +41,12 @@ func (r Postgres) GetPageReference(ctx context.Context, pageID string, userID in
 }
 
 func (r Postgres) GetUserPages(ctx context.Context, userID int64) ([]*models.PageReference, error) {
-	query := `
-		SELECT page_id, user_id, title, category, level, source, created_at, last_synced
-		FROM page_references
-		WHERE user_id = $1
-	`
-
-	rows, err := r.db.QueryContext(ctx, query, userID)
-	if err != nil {
-		return nil, fmt.Errorf("query user pages (user_id: %d): %w", userID, err)
-	}
-	defer rows.Close()
+	query := `SELECT page_id, user_id, title, source, created_at, updated_at FROM page_references WHERE user_id = $1`
 
 	var pages []*models.PageReference
-	for rows.Next() {
-		var page models.PageReference
-		err := rows.Scan(
-			&page.PageID,
-			&page.UserID,
-			&page.Title,
-			&page.Category,
-			&page.Level,
-			&page.Source,
-			&page.CreatedAt,
-			&page.LastSynced,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("scan page row (user_id: %d): %w", userID, err)
-		}
-		pages = append(pages, &page)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate page rows (user_id: %d): %w", userID, err)
+	err := r.db.SelectContext(ctx, &pages, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("query user pages (user_id: %d): %w", userID, err)
 	}
 
 	return pages, nil

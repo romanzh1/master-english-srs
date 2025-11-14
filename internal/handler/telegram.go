@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,8 +31,10 @@ type Service interface {
 	GetDuePagesToday(ctx context.Context, telegramID int64) ([]*models.PageWithProgress, error)
 	GetUserPages(ctx context.Context, telegramID int64) ([]*models.PageReference, error)
 	GetPageContent(ctx context.Context, telegramID int64, pageID string) (string, error)
-	UpdateReviewProgress(ctx context.Context, telegramID int64, pageID string, success bool) error
+	UpdateReviewProgress(ctx context.Context, telegramID int64, pageID string, grade int) error
+	UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, maxPages uint) error
 	GetProgress(ctx context.Context, telegramID int64, pageID string) (*models.UserProgress, error)
+	RunDailyCron(ctx context.Context) error
 }
 
 type TelegramHandler struct {
@@ -65,6 +68,10 @@ func (h *TelegramHandler) handleCommand(ctx context.Context, update tgbotapi.Upd
 		h.handleToday(ctx, update)
 	case "pages":
 		h.handlePages(ctx, update)
+	case "set_max_pages":
+		h.handleSetMaxPages(ctx, update)
+	case "get_max_pages":
+		h.handleGetMaxPages(ctx, update)
 	case "help":
 		h.handleHelp(ctx, update)
 	default:
@@ -81,6 +88,7 @@ func (h *TelegramHandler) Start() {
 	zap.S().Info("bot started")
 
 	go h.startReminderScheduler()
+	go h.startDailyCron()
 
 	for update := range updates {
 		if update.Message == nil && update.CallbackQuery == nil {
@@ -441,7 +449,6 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 	userID := update.Message.From.ID
 	chatID := update.Message.Chat.ID
 
-	// Проверяем, существует ли пользователь
 	exists, err := h.service.UserExists(ctx, userID)
 	if err != nil {
 		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
@@ -497,6 +504,8 @@ func (h *TelegramHandler) handleHelp(ctx context.Context, update tgbotapi.Update
 		/select_section - Выбрать секцию OneNote для синхронизации
 		/today - Показать страницы на сегодня
 		/pages - Список всех страниц
+		/set_max_pages - Установить максимальное количество страниц в день (2, 3 или 4)
+		/get_max_pages - Показать текущее максимальное количество страниц в день
 		/help - Справка
 
 		Примечание: Страницы синхронизируются автоматически при запросе.`
@@ -517,10 +526,20 @@ func (h *TelegramHandler) handleCallback(ctx context.Context, update tgbotapi.Up
 		h.handleSectionSelection(ctx, callback)
 	} else if strings.HasPrefix(data, "show_") {
 		h.handleShowPage(ctx, callback)
+	} else if strings.HasPrefix(data, "grade_80_100_") {
+		h.handleGradeReview(ctx, callback, 90) // Use 90 as middle value for 80-100 range
+	} else if strings.HasPrefix(data, "grade_60_80_") {
+		h.handleGradeReview(ctx, callback, 70) // Use 70 as middle value for 60-80 range
+	} else if strings.HasPrefix(data, "grade_40_60_") {
+		h.handleGradeReview(ctx, callback, 50) // Use 50 as middle value for 40-60 range
+	} else if strings.HasPrefix(data, "grade_0_40_") {
+		h.handleGradeReview(ctx, callback, 30) // Use 30 as middle value for 0-40 range
 	} else if strings.HasPrefix(data, "success_") {
-		h.handleReviewSuccess(ctx, callback)
+		// Legacy support - treat as easy (80+)
+		h.handleGradeReview(ctx, callback, 90)
 	} else if strings.HasPrefix(data, "failure_") {
-		h.handleReviewFailure(ctx, callback)
+		// Legacy support - treat as forgot (<40)
+		h.handleGradeReview(ctx, callback, 30)
 	} else if data == "skip_all" {
 		h.handleSkipAll(ctx, callback)
 	} else {
@@ -542,7 +561,6 @@ func (h *TelegramHandler) handleLevelSelection(ctx context.Context, callback *tg
 	level := strings.TrimPrefix(callback.Data, "level_")
 	chatID := callback.Message.Chat.ID
 
-	// Проверяем, существует ли пользователь
 	exists, err := h.service.UserExists(ctx, userID)
 	if err != nil {
 		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
@@ -652,8 +670,12 @@ func (h *TelegramHandler) handleShowPage(ctx context.Context, callback *tgbotapi
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("✅ Успешно (≥80%)", fmt.Sprintf("success_%s", pageID)),
-			tgbotapi.NewInlineKeyboardButtonData("⚠️ Неудача (<80%)", fmt.Sprintf("failure_%s", pageID)),
+			tgbotapi.NewInlineKeyboardButtonData("✅ Easy (>80%)", fmt.Sprintf("grade_80_100_%s", pageID)),
+			tgbotapi.NewInlineKeyboardButtonData("🟢 Normal (>60%)", fmt.Sprintf("grade_60_80_%s", pageID)),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🟡 Hard (>40%)", fmt.Sprintf("grade_40_60_%s", pageID)),
+			tgbotapi.NewInlineKeyboardButtonData("🔴 Forgot (<40%)", fmt.Sprintf("grade_0_40_%s", pageID)),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("↩️ Пропустить", "skip_all"),
@@ -663,19 +685,43 @@ func (h *TelegramHandler) handleShowPage(ctx context.Context, callback *tgbotapi
 	h.sendMessageWithKeyboard(callback.Message.Chat.ID, text, keyboard)
 }
 
+func (h *TelegramHandler) handleGradeReview(ctx context.Context, callback *tgbotapi.CallbackQuery, grade int) {
+	// Extract pageID from callback data
+	data := callback.Data
+	var pageID string
+	if strings.HasPrefix(data, "grade_80_100_") {
+		pageID = strings.TrimPrefix(data, "grade_80_100_")
+	} else if strings.HasPrefix(data, "grade_60_80_") {
+		pageID = strings.TrimPrefix(data, "grade_60_80_")
+	} else if strings.HasPrefix(data, "grade_40_60_") {
+		pageID = strings.TrimPrefix(data, "grade_40_60_")
+	} else if strings.HasPrefix(data, "grade_0_40_") {
+		pageID = strings.TrimPrefix(data, "grade_0_40_")
+	} else if strings.HasPrefix(data, "success_") {
+		pageID = strings.TrimPrefix(data, "success_")
+	} else if strings.HasPrefix(data, "failure_") {
+		pageID = strings.TrimPrefix(data, "failure_")
+	} else {
+		zap.S().Warn("unknown grade callback format", zap.String("data", data))
+		return
+	}
+
+	h.updateReviewProgress(ctx, callback.From.ID, callback.Message.Chat.ID, pageID, grade)
+}
+
 func (h *TelegramHandler) handleReviewSuccess(ctx context.Context, callback *tgbotapi.CallbackQuery) {
-	pageID := strings.TrimPrefix(callback.Data, "success_")
-	h.updateReviewProgress(ctx, callback.From.ID, callback.Message.Chat.ID, pageID, true)
+	// Legacy support
+	h.handleGradeReview(ctx, callback, 90)
 }
 
 func (h *TelegramHandler) handleReviewFailure(ctx context.Context, callback *tgbotapi.CallbackQuery) {
-	pageID := strings.TrimPrefix(callback.Data, "failure_")
-	h.updateReviewProgress(ctx, callback.From.ID, callback.Message.Chat.ID, pageID, false)
+	// Legacy support
+	h.handleGradeReview(ctx, callback, 30)
 }
 
-func (h *TelegramHandler) updateReviewProgress(ctx context.Context, userID int64, chatID int64, pageID string, success bool) {
-	if err := h.service.UpdateReviewProgress(ctx, userID, pageID, success); err != nil {
-		zap.S().Error("update review progress", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("page_id", pageID), zap.Bool("success", success))
+func (h *TelegramHandler) updateReviewProgress(ctx context.Context, userID int64, chatID int64, pageID string, grade int) {
+	if err := h.service.UpdateReviewProgress(ctx, userID, pageID, grade); err != nil {
+		zap.S().Error("update review progress", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("page_id", pageID), zap.Int("grade", grade))
 		h.sendMessage(chatID, "Ошибка при обновлении прогресса.")
 		return
 	}
@@ -683,10 +729,15 @@ func (h *TelegramHandler) updateReviewProgress(ctx context.Context, userID int64
 	progress, _ := h.service.GetProgress(ctx, userID, pageID)
 
 	var statusText string
-	if success {
-		statusText = fmt.Sprintf("✅ Отлично! Следующее повторение через %d дней.", progress.IntervalDays)
-	} else {
-		statusText = "⚠️ Ничего страшного! Повторим завтра."
+	switch {
+	case grade > 80:
+		statusText = fmt.Sprintf("✅ Easy! Следующее повторение через %d дней.", progress.IntervalDays)
+	case grade > 60:
+		statusText = fmt.Sprintf("🟢 Normal! Следующее повторение через %d дней.", progress.IntervalDays)
+	case grade > 40:
+		statusText = fmt.Sprintf("🟡 Hard! Следующее повторение через %d дней.", progress.IntervalDays)
+	default:
+		statusText = "🔴 Forgot! Повторим завтра."
 	}
 
 	h.sendMessage(chatID, statusText)
@@ -694,6 +745,106 @@ func (h *TelegramHandler) updateReviewProgress(ctx context.Context, userID int64
 
 func (h *TelegramHandler) handleSkipAll(ctx context.Context, callback *tgbotapi.CallbackQuery) {
 	h.sendMessage(callback.Message.Chat.ID, "Хорошо, пропускаем на сегодня. Увидимся завтра! 👋")
+}
+
+func (h *TelegramHandler) handleSetMaxPages(ctx context.Context, update tgbotapi.Update) {
+	userID := update.Message.From.ID
+	chatID := update.Message.Chat.ID
+
+	exists, err := h.service.UserExists(ctx, userID)
+	if err != nil {
+		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	if !exists {
+		h.sendMessage(chatID, "Сначала зарегистрируйся с помощью команды /start")
+		return
+	}
+
+	// Parse number from message text after command
+	parts := strings.Fields(update.Message.Text)
+	if len(parts) < 2 {
+		h.sendMessage(chatID, "Использование: /set_max_pages <число>\n\nНапример: /set_max_pages 3\n\nДоступные значения: 2, 3 или 4")
+		return
+	}
+
+	maxPagesInt, err := strconv.Atoi(parts[1])
+	if err != nil || maxPagesInt < 2 || maxPagesInt > 4 {
+		h.sendMessage(chatID, "Некорректное значение. Используй число от 2 до 4.\n\n2 страницы в день → добавляется 1 страница\n3 страницы в день → добавляется 1 (60%) или 2 (40%)\n4 страницы в день → добавляется 2 страницы")
+		return
+	}
+
+	maxPages := uint(maxPagesInt)
+	if err := h.service.UpdateMaxPagesPerDay(ctx, userID, maxPages); err != nil {
+		zap.S().Error("update max pages per day", zap.Error(err), zap.Int64("telegram_id", userID), zap.Uint("max_pages", maxPages))
+		h.sendMessage(chatID, "Ошибка при обновлении настроек. Попробуй позже.")
+		return
+	}
+
+	h.sendMessage(chatID, fmt.Sprintf("✅ Максимальное количество страниц в день установлено: %d", maxPages))
+}
+
+func (h *TelegramHandler) handleGetMaxPages(ctx context.Context, update tgbotapi.Update) {
+	userID := update.Message.From.ID
+	chatID := update.Message.Chat.ID
+
+	exists, err := h.service.UserExists(ctx, userID)
+	if err != nil {
+		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	if !exists {
+		h.sendMessage(chatID, "Сначала зарегистрируйся с помощью команды /start")
+		return
+	}
+
+	user, err := h.service.GetUser(ctx, userID)
+	if err != nil {
+		zap.S().Error("get user", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	maxPages := uint(2) // default
+	if user.MaxPagesPerDay != nil {
+		maxPages = *user.MaxPagesPerDay
+	}
+
+	h.sendMessage(chatID, fmt.Sprintf("📊 Текущее максимальное количество страниц в день: %d", maxPages))
+}
+
+// startDailyCron runs daily cron job at 00:00 Moscow time
+func (h *TelegramHandler) startDailyCron() {
+	moscow, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		zap.S().Error("load moscow location", zap.Error(err))
+		moscow = time.UTC
+	}
+
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	var lastRunDate time.Time
+
+	for range ticker.C {
+		now := time.Now().In(moscow)
+		currentDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, moscow)
+
+		// Check if it's 00:00 and we haven't run today
+		if now.Hour() == 0 && now.Minute() == 0 && !lastRunDate.Equal(currentDate) {
+			ctx := context.Background()
+			if err := h.service.RunDailyCron(ctx); err != nil {
+				zap.S().Error("run daily cron", zap.Error(err))
+			} else {
+				lastRunDate = currentDate
+				zap.S().Info("daily cron completed successfully")
+			}
+		}
+	}
 }
 
 // escapeHTML экранирует специальные символы HTML для безопасной вставки в HTML-текст

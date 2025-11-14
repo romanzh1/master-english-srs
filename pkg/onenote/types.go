@@ -23,8 +23,10 @@ type PagesResponse struct {
 }
 
 type Page struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
+	ID                string `json:"id"`
+	Title             string `json:"title"`
+	LastModifiedDateTime string `json:"lastModifiedDateTime"`
+	CreatedDateTime   string `json:"createdDateTime"`
 }
 
 type TokenResponse struct {

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/yourusername/master-english-srs/internal/models"
-	"github.com/yourusername/master-english-srs/internal/srs"
+	"github.com/yourusername/master-english-srs/internal/service/srs"
 	"github.com/yourusername/master-english-srs/pkg/onenote"
 	"go.uber.org/zap"
 )
@@ -24,6 +24,7 @@ type Repository interface {
 	UpdateOneNoteAuth(ctx context.Context, telegramID int64, auth *models.OneNoteAuth) error
 	UpdateAuthCode(ctx context.Context, telegramID int64, authCode string) error
 	UpdateOneNoteConfig(ctx context.Context, telegramID int64, config *models.OneNoteConfig) error
+	UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, maxPages uint) error
 	GetAllUsersWithReminders(ctx context.Context) ([]*models.User, error)
 
 	CreatePageReference(ctx context.Context, page *models.PageReference) error
@@ -33,9 +34,11 @@ type Repository interface {
 
 	CreateProgress(ctx context.Context, progress *models.UserProgress) error
 	GetProgress(ctx context.Context, userID int64, pageID string) (*models.UserProgress, error)
-	UpdateProgress(ctx context.Context, userID int64, pageID string, repetitionCount int, lastReviewDate, nextReviewDate time.Time, intervalDays int) error
+	UpdateProgress(ctx context.Context, userID int64, pageID string, level string, repetitionCount int, lastReviewDate, nextReviewDate time.Time, intervalDays int) error
 	AddProgressHistory(ctx context.Context, userID int64, pageID string, history models.ProgressHistory) error
-	GetDuePagesToday(ctx context.Context, userID int64) ([]*models.PageWithProgress, error)
+	GetDuePagesToday(ctx context.Context, userID int64) ([]*models.UserProgress, error)
+	GetAllProgressPageIDs(ctx context.Context, userID int64) ([]string, error)
+	GetPageIDsNotInProgress(ctx context.Context, userID int64, pageIDs []string) ([]string, error)
 	ProgressExists(ctx context.Context, userID int64, pageID string) (bool, error)
 }
 
@@ -243,7 +246,6 @@ func (s *Service) SaveOneNoteConfig(ctx context.Context, telegramID int64, noteb
 	return nil
 }
 
-// syncPagesInternal выполняет синхронизацию страниц из OneNote
 func (s *Service) syncPagesInternal(ctx context.Context, telegramID int64) (int, error) {
 	user, err := s.repo.GetUser(ctx, telegramID)
 	if err != nil {
@@ -278,42 +280,26 @@ func (s *Service) syncPagesInternal(ctx context.Context, telegramID int64) (int,
 			continue
 		}
 
+		var updatedAt *time.Time
+		if page.LastModifiedDateTime != "" {
+			parsed, err := time.Parse(time.RFC3339, page.LastModifiedDateTime)
+			if err == nil {
+				updatedAt = &parsed
+			}
+		}
+
 		pageRef := &models.PageReference{
-			PageID:     page.ID,
-			UserID:     telegramID,
-			Title:      page.Title,
-			Category:   "vocabulary",
-			Level:      user.Level,
-			Source:     "onenote",
-			CreatedAt:  time.Now(),
-			LastSynced: time.Now(),
+			PageID:    page.ID,
+			UserID:    telegramID,
+			Title:     page.Title,
+			Source:    "onenote",
+			CreatedAt: time.Now(),
+			UpdatedAt: updatedAt,
 		}
 
 		if err := s.repo.CreatePageReference(ctx, pageRef); err != nil {
 			zap.S().Error("create page reference", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", page.ID))
 			continue
-		}
-
-		exists, err := s.repo.ProgressExists(ctx, telegramID, page.ID)
-		if err != nil {
-			zap.S().Error("check progress exists", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", page.ID))
-			continue
-		}
-
-		if !exists {
-			nextReview, interval := srs.GetInitialReviewDate()
-			progress := &models.UserProgress{
-				UserID:          telegramID,
-				PageID:          page.ID,
-				RepetitionCount: 0,
-				NextReviewDate:  nextReview,
-				IntervalDays:    interval,
-				SuccessRate:     0,
-			}
-
-			if err := s.repo.CreateProgress(ctx, progress); err != nil {
-				zap.S().Error("create progress", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", page.ID))
-			}
 		}
 	}
 
@@ -347,7 +333,6 @@ func (s *Service) withAuthRetry(ctx context.Context, telegramID int64, operation
 	return operation(accessToken)
 }
 
-// isAuthError проверяет, является ли ошибка ошибкой авторизации (401 или 403)
 func isAuthError(err error) bool {
 	if err == nil {
 		return false
@@ -357,78 +342,163 @@ func isAuthError(err error) bool {
 }
 
 func (s *Service) GetDuePagesToday(ctx context.Context, telegramID int64) ([]*models.PageWithProgress, error) {
-	_, err := s.syncPagesInternal(ctx, telegramID)
+	user, err := s.repo.GetUser(ctx, telegramID)
 	if err != nil {
-		if _, ok := err.(*AuthRequiredError); ok {
-			return nil, fmt.Errorf("sync pages (telegram_id: %d): %w", telegramID, err)
-		}
-		zap.S().Warn("failed to sync pages before getting due pages", zap.Error(err), zap.Int64("telegram_id", telegramID))
+		return nil, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
 	}
 
-	duePages, err := s.repo.GetDuePagesToday(ctx, telegramID)
+	if user.OneNoteConfig == nil {
+		return nil, fmt.Errorf("onenote not configured (telegram_id: %d)", telegramID)
+	}
+
+	progressList, err := s.repo.GetDuePagesToday(ctx, telegramID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get due pages today (telegram_id: %d): %w", telegramID, err)
 	}
 
-	// Фильтруем страницы с * в заголовке (страницы на доработке)
-	filteredPages := make([]*models.PageWithProgress, 0, len(duePages))
-	for _, pwp := range duePages {
-		if !strings.Contains(pwp.Page.Title, "*") {
-			filteredPages = append(filteredPages, pwp)
+	if len(progressList) == 0 {
+		return []*models.PageWithProgress{}, nil
+	}
+
+	var onenotePages []onenote.Page
+	err = s.withAuthRetry(ctx, telegramID, func(accessToken string) error {
+		result, err := s.oneNoteClient.GetPages(accessToken, user.OneNoteConfig.SectionID)
+		if err != nil {
+			return fmt.Errorf("get pages (telegram_id: %d, section_id: %s): %w", telegramID, user.OneNoteConfig.SectionID, err)
 		}
+		onenotePages = result
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get onenote pages (telegram_id: %d): %w", telegramID, err)
 	}
 
-	// Сортируем по номеру из заголовка, затем по дате следующего повторения
-	slices.SortFunc(filteredPages, func(a, b *models.PageWithProgress) int {
+	pageMap := make(map[string]onenote.Page, len(onenotePages))
+	for _, page := range onenotePages {
+		pageMap[page.ID] = page
+	}
+
+	result := make([]*models.PageWithProgress, 0, len(progressList))
+	for _, progress := range progressList {
+		page, ok := pageMap[progress.PageID]
+		if !ok {
+			continue
+		}
+
+		if strings.Contains(page.Title, "*") {
+			continue
+		}
+
+		var updatedAt *time.Time
+		if page.LastModifiedDateTime != "" {
+			parsed, err := time.Parse(time.RFC3339, page.LastModifiedDateTime)
+			if err == nil {
+				updatedAt = &parsed
+			}
+		}
+
+		pwp := &models.PageWithProgress{
+			Page: models.PageReference{
+				PageID:    page.ID,
+				UserID:    telegramID,
+				Title:     page.Title,
+				Source:    "onenote",
+				CreatedAt: time.Now(),
+				UpdatedAt: updatedAt,
+			},
+			Progress: progress,
+		}
+		result = append(result, pwp)
+	}
+
+	slices.SortFunc(result, func(a, b *models.PageWithProgress) int {
 		numA := extractPageNumber(a.Page.Title)
 		numB := extractPageNumber(b.Page.Title)
 		if numA != numB {
 			return cmp.Compare(numA, numB)
 		}
-		// Если номера одинаковые, сортируем по дате следующего повторения
+
 		return a.Progress.NextReviewDate.Compare(b.Progress.NextReviewDate)
 	})
 
-	return filteredPages, nil
+	return result, nil
 }
 
 func (s *Service) GetUserPages(ctx context.Context, telegramID int64) ([]*models.PageReference, error) {
-	_, err := s.syncPagesInternal(ctx, telegramID)
+	user, err := s.repo.GetUser(ctx, telegramID)
 	if err != nil {
-		if _, ok := err.(*AuthRequiredError); ok {
-			return nil, fmt.Errorf("sync pages (telegram_id: %d): %w", telegramID, err)
-		}
-		zap.S().Warn("failed to sync pages before getting user pages", zap.Error(err), zap.Int64("telegram_id", telegramID))
+		return nil, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
 	}
 
-	pages, err := s.repo.GetUserPages(ctx, telegramID)
+	if user.OneNoteConfig == nil {
+		return nil, fmt.Errorf("onenote not configured (telegram_id: %d)", telegramID)
+	}
+
+	var onenotePages []onenote.Page
+	err = s.withAuthRetry(ctx, telegramID, func(accessToken string) error {
+		result, err := s.oneNoteClient.GetPages(accessToken, user.OneNoteConfig.SectionID)
+		if err != nil {
+			return fmt.Errorf("get pages (telegram_id: %d, section_id: %s): %w", telegramID, user.OneNoteConfig.SectionID, err)
+		}
+		onenotePages = result
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("get user pages (telegram_id: %d): %w", telegramID, err)
+		return nil, fmt.Errorf("get onenote pages (telegram_id: %d): %w", telegramID, err)
 	}
 
-	// Фильтруем страницы с * в заголовке (страницы на доработке)
-	filteredPages := make([]*models.PageReference, 0, len(pages))
-	for _, page := range pages {
-		if !strings.Contains(page.Title, "*") {
-			filteredPages = append(filteredPages, page)
+	allProgressPageIDs, err := s.repo.GetAllProgressPageIDs(ctx, telegramID)
+	if err != nil {
+		return nil, fmt.Errorf("get all progress page IDs (telegram_id: %d): %w", telegramID, err)
+	}
+
+	inProgressMap := make(map[string]bool, len(allProgressPageIDs))
+	for _, pageID := range allProgressPageIDs {
+		inProgressMap[pageID] = true
+	}
+
+	result := make([]*models.PageReference, 0, len(onenotePages))
+	for _, page := range onenotePages {
+		if strings.Contains(page.Title, "*") {
+			continue
 		}
+
+		if !inProgressMap[page.ID] {
+			continue
+		}
+
+		var updatedAt *time.Time
+		if page.LastModifiedDateTime != "" {
+			parsed, err := time.Parse(time.RFC3339, page.LastModifiedDateTime)
+			if err == nil {
+				updatedAt = &parsed
+			}
+		}
+
+		pageRef := &models.PageReference{
+			PageID:    page.ID,
+			UserID:    telegramID,
+			Title:     page.Title,
+			Source:    "onenote",
+			CreatedAt: time.Now(),
+			UpdatedAt: updatedAt,
+		}
+		result = append(result, pageRef)
 	}
 
-	// Сортируем по номеру из заголовка
-	slices.SortFunc(filteredPages, func(a, b *models.PageReference) int {
+	slices.SortFunc(result, func(a, b *models.PageReference) int {
 		numA := extractPageNumber(a.Title)
 		numB := extractPageNumber(b.Title)
 		return cmp.Compare(numA, numB)
 	})
 
-	return filteredPages, nil
+	return result, nil
 }
 
 // extractPageNumber извлекает первое число из начала заголовка страницы
 // Например, "14 Grammar Sequence of Tenses" -> 14
 // Если число не найдено, возвращает максимальное значение int для сортировки в конец
 func extractPageNumber(title string) int {
-	// Удаляем пробелы в начале
 	title = strings.TrimSpace(title)
 	if title == "" {
 		return 0
@@ -438,7 +508,6 @@ func extractPageNumber(title string) int {
 	re := regexp.MustCompile(`^\d+`)
 	match := re.FindString(title)
 	if match == "" {
-		// Если число не найдено, возвращаем максимальное значение для сортировки в конец
 		return 999999
 	}
 
@@ -465,28 +534,25 @@ func (s *Service) GetPageContent(ctx context.Context, telegramID int64, pageID s
 	return content, err
 }
 
-func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pageID string, success bool) error {
+func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pageID string, grade int) error {
 	progress, err := s.repo.GetProgress(ctx, telegramID, pageID)
 	if err != nil {
 		return fmt.Errorf("get progress (telegram_id: %d, page_id: %s): %w", telegramID, pageID, err)
 	}
 
-	nextReview, newInterval := srs.CalculateNextReviewDate(progress.IntervalDays, success)
+	status := srs.ConvertGradeToStatus(grade)
+	nextReview, newInterval := srs.CalculateNextReviewDate(progress.IntervalDays, status)
 
-	newRepCount := progress.RepetitionCount
-	if success {
-		newRepCount++
-	}
+	newRepCount := progress.RepetitionCount + 1
 
 	history := models.ProgressHistory{
-		Date:   time.Now(),
-		Score:  0,
-		Passed: success,
-		Mode:   "standard",
-		Notes:  "",
+		Date:  time.Now(),
+		Score: grade,
+		Mode:  "standard", // TODO get from model
+		Notes: "",
 	}
 
-	if err := s.repo.UpdateProgress(ctx, telegramID, pageID, newRepCount, time.Now(), nextReview, newInterval); err != nil {
+	if err := s.repo.UpdateProgress(ctx, telegramID, pageID, progress.Level, newRepCount, time.Now(), nextReview, newInterval); err != nil {
 		return fmt.Errorf("update progress (telegram_id: %d, page_id: %s): %w", telegramID, pageID, err)
 	}
 
@@ -503,4 +569,123 @@ func (s *Service) GetAllUsersForReminders(ctx context.Context) ([]*models.User, 
 
 func (s *Service) GetProgress(ctx context.Context, telegramID int64, pageID string) (*models.UserProgress, error) {
 	return s.repo.GetProgress(ctx, telegramID, pageID)
+}
+
+func (s *Service) UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, maxPages uint) error {
+	if err := s.repo.UpdateMaxPagesPerDay(ctx, telegramID, maxPages); err != nil {
+		return fmt.Errorf("update max pages per day (telegram_id: %d, max_pages: %d): %w", telegramID, maxPages, err)
+	}
+
+	return nil
+}
+
+func (s *Service) AddPagesToLearning(ctx context.Context, telegramID int64) error {
+	user, err := s.repo.GetUser(ctx, telegramID)
+	if err != nil {
+		return fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
+	}
+
+	if user.OneNoteConfig == nil {
+		return fmt.Errorf("onenote not configured (telegram_id: %d)", telegramID)
+	}
+
+	maxPagesPerDay := uint(2)
+	if user.MaxPagesPerDay != nil {
+		maxPagesPerDay = *user.MaxPagesPerDay
+	}
+
+	pagesToAdd := srs.CalculatePagesToAdd(maxPagesPerDay)
+
+	var onenotePages []onenote.Page
+	err = s.withAuthRetry(ctx, telegramID, func(accessToken string) error {
+		result, err := s.oneNoteClient.GetPages(accessToken, user.OneNoteConfig.SectionID)
+		if err != nil {
+			return fmt.Errorf("get pages (telegram_id: %d, section_id: %s): %w", telegramID, user.OneNoteConfig.SectionID, err)
+		}
+
+		onenotePages = result
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("get onenote pages (telegram_id: %d): %w", telegramID, err)
+	}
+
+	availablePages := make([]onenote.Page, 0, len(onenotePages))
+	for _, page := range onenotePages {
+		if !strings.Contains(page.Title, "*") {
+			availablePages = append(availablePages, page)
+		}
+	}
+
+	slices.SortFunc(availablePages, func(a, b onenote.Page) int {
+		numA := extractPageNumber(a.Title)
+		numB := extractPageNumber(b.Title)
+		return cmp.Compare(numA, numB)
+	})
+
+	pageIDs := make([]string, 0, len(availablePages))
+	for _, page := range availablePages {
+		pageIDs = append(pageIDs, page.ID)
+	}
+
+	notInProgress, err := s.repo.GetPageIDsNotInProgress(ctx, telegramID, pageIDs)
+	if err != nil {
+		return fmt.Errorf("get page IDs not in progress (telegram_id: %d): %w", telegramID, err)
+	}
+
+	if len(notInProgress) > pagesToAdd {
+		notInProgress = notInProgress[:pagesToAdd]
+	}
+
+	for _, pageID := range notInProgress {
+		nextReview, interval := srs.GetInitialReviewDate()
+		progress := &models.UserProgress{
+			UserID:          telegramID,
+			PageID:          pageID,
+			Level:           user.Level,
+			RepetitionCount: 0,
+			NextReviewDate:  nextReview,
+			IntervalDays:    interval,
+			SuccessRate:     0,
+		}
+
+		if err := s.repo.CreateProgress(ctx, progress); err != nil {
+			zap.S().Error("create progress", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", pageID))
+			continue
+		}
+	}
+
+	return nil
+}
+
+// RunDailyCron runs daily cron job at 00:00 Moscow time
+// For all users, it adds new pages to learning and updates next_review_date
+func (s *Service) RunDailyCron(ctx context.Context) error {
+	users, err := s.repo.GetAllUsersWithReminders(ctx)
+	if err != nil {
+		return fmt.Errorf("get all users: %w", err)
+	}
+
+	for _, user := range users {
+		if user.OneNoteConfig == nil {
+			continue
+		}
+
+		_, err := s.syncPagesInternal(ctx, user.TelegramID)
+		if err != nil {
+			if _, ok := err.(*AuthRequiredError); ok {
+				zap.S().Warn("auth required for daily cron", zap.Int64("telegram_id", user.TelegramID))
+				continue
+			}
+			zap.S().Warn("failed to sync pages in daily cron", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
+		}
+
+		if err := s.AddPagesToLearning(ctx, user.TelegramID); err != nil {
+			zap.S().Error("add pages to learning in daily cron", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
+			continue
+		}
+	}
+
+	return nil
 }

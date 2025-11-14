@@ -7,10 +7,12 @@ CREATE TABLE IF NOT EXISTS users
     onenote_access_token  text,
     onenote_refresh_token text,
     onenote_expires_at    timestamp,
+    onenote_auth_code     text,
     onenote_notebook_id   varchar(255),
     onenote_section_id    varchar(255),
     use_manual_pages      boolean     DEFAULT FALSE,
     reminder_time         varchar(10) DEFAULT '09:00',
+    max_pages_per_day     integer     DEFAULT 2,
     created_at            timestamp   DEFAULT NOW()
 );
 
@@ -19,12 +21,9 @@ CREATE TABLE IF NOT EXISTS page_references
     page_id     varchar(255) NOT NULL,
     user_id     bigint       NOT NULL,
     title       text         NOT NULL,
-    page_number integer,
-    category    varchar(50),
-    level       varchar(10),
     source      varchar(50),
     created_at  timestamp DEFAULT NOW(),
-    last_synced timestamp,
+    updated_at  timestamp,
     PRIMARY KEY (page_id, user_id),
     FOREIGN KEY (user_id) REFERENCES users (telegram_id)
         ON DELETE CASCADE
@@ -34,6 +33,7 @@ CREATE TABLE IF NOT EXISTS user_progress
 (
     user_id          bigint       NOT NULL,
     page_id          varchar(255) NOT NULL,
+    level            varchar(10),
     repetition_count integer DEFAULT 0,
     last_review_date timestamp,
     next_review_date timestamp,
@@ -45,7 +45,24 @@ CREATE TABLE IF NOT EXISTS user_progress
         ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS progress_history
+(
+    user_id  bigint       NOT NULL,
+    page_id  varchar(255) NOT NULL,
+    date     timestamp    NOT NULL,
+    score    integer      NOT NULL,
+    mode     varchar(50),
+    notes    text,
+    PRIMARY KEY (user_id, page_id, date),
+    FOREIGN KEY (user_id, page_id) REFERENCES user_progress (user_id, page_id)
+        ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_next_review_date ON user_progress (user_id, next_review_date);
-CREATE INDEX IF NOT EXISTS idx_page_number ON page_references (user_id, page_number);
 
 -- +goose Down
+DROP INDEX IF EXISTS idx_next_review_date;
+DROP TABLE IF EXISTS progress_history;
+DROP TABLE IF EXISTS user_progress;
+DROP TABLE IF EXISTS page_references;
+DROP TABLE IF EXISTS users;
