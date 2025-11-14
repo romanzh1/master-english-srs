@@ -3,8 +3,9 @@ package repository
 import (
 	"context"
 	"fmt"
+	"time"
 
-	"github.com/yourusername/master-english-srs/internal/models"
+	"github.com/romanzh1/master-english-srs/internal/models"
 )
 
 func (r Postgres) CreateUser(ctx context.Context, user *models.User) error {
@@ -22,7 +23,7 @@ func (r Postgres) CreateUser(ctx context.Context, user *models.User) error {
 		return fmt.Errorf("build SQL query (telegram_id: %d): %w", user.TelegramID, err)
 	}
 
-	_, err = r.db.ExecContext(ctx, sql, args...)
+	_, err = r.ExecContext(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("create user (telegram_id: %d, username: %s): %w", user.TelegramID, user.Username, err)
 	}
@@ -33,12 +34,12 @@ func (r Postgres) GetUser(ctx context.Context, telegramID int64) (*models.User, 
 	query := `
 		SELECT telegram_id, username, level, onenote_access_token, onenote_refresh_token, 
 		       onenote_expires_at, onenote_auth_code, onenote_notebook_id, onenote_section_id, 
-		       use_manual_pages, reminder_time, max_pages_per_day, created_at
+		       use_manual_pages, reminder_time, max_pages_per_day, materials_prepared_at, created_at
 		FROM users WHERE telegram_id = $1
 	`
 
 	var user models.User
-	err := r.db.GetContext(ctx, &user, query, telegramID)
+	err := r.GetContext(ctx, &user, query, telegramID)
 	if err != nil {
 		return nil, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
 	}
@@ -70,7 +71,7 @@ func (r Postgres) UserExists(ctx context.Context, telegramID int64) (bool, error
 	}
 
 	var count int
-	err = r.db.QueryRowContext(ctx, sql, args...).Scan(&count)
+	err = r.QueryRowxContext(ctx, sql, args...).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check user exists (telegram_id: %d): %w", telegramID, err)
 	}
@@ -87,7 +88,7 @@ func (r Postgres) UpdateUserLevel(ctx context.Context, telegramID int64, level s
 		return fmt.Errorf("build SQL query (telegram_id: %d, level: %s): %w", telegramID, level, err)
 	}
 
-	_, err = r.db.ExecContext(ctx, sql, args...)
+	_, err = r.ExecContext(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("update user level (telegram_id: %d, level: %s): %w", telegramID, level, err)
 	}
@@ -106,7 +107,7 @@ func (r Postgres) UpdateOneNoteAuth(ctx context.Context, telegramID int64, auth 
 		return fmt.Errorf("build SQL query (telegram_id: %d): %w", telegramID, err)
 	}
 
-	_, err = r.db.ExecContext(ctx, sql, args...)
+	_, err = r.ExecContext(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("update OneNote auth (telegram_id: %d): %w", telegramID, err)
 	}
@@ -123,7 +124,7 @@ func (r Postgres) UpdateAuthCode(ctx context.Context, telegramID int64, authCode
 		return fmt.Errorf("build SQL query (telegram_id: %d): %w", telegramID, err)
 	}
 
-	_, err = r.db.ExecContext(ctx, sql, args...)
+	_, err = r.ExecContext(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("update auth code (telegram_id: %d): %w", telegramID, err)
 	}
@@ -141,7 +142,7 @@ func (r Postgres) UpdateOneNoteConfig(ctx context.Context, telegramID int64, con
 		return fmt.Errorf("build SQL query (telegram_id: %d, notebook_id: %s): %w", telegramID, config.NotebookID, err)
 	}
 
-	_, err = r.db.ExecContext(ctx, sql, args...)
+	_, err = r.ExecContext(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("update OneNote config (telegram_id: %d, notebook_id: %s): %w", telegramID, config.NotebookID, err)
 	}
@@ -152,12 +153,12 @@ func (r Postgres) GetAllUsersWithReminders(ctx context.Context) ([]*models.User,
 	query := `
 		SELECT telegram_id, username, level, onenote_access_token, onenote_refresh_token, 
 		       onenote_expires_at, onenote_auth_code, onenote_notebook_id, onenote_section_id, 
-		       use_manual_pages, reminder_time, max_pages_per_day, created_at
+		       use_manual_pages, reminder_time, max_pages_per_day, materials_prepared_at, created_at
 		FROM users
 	`
 
 	var dbUsers []models.User
-	if err := r.db.SelectContext(ctx, &dbUsers, query); err != nil {
+	if err := r.SelectContext(ctx, &dbUsers, query); err != nil {
 		return nil, fmt.Errorf("query users: %w", err)
 	}
 
@@ -195,9 +196,26 @@ func (r Postgres) UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, ma
 		return fmt.Errorf("build SQL query (telegram_id: %d, max_pages: %d): %w", telegramID, maxPages, err)
 	}
 
-	_, err = r.db.ExecContext(ctx, sql, args...)
+	_, err = r.ExecContext(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("update max pages per day (telegram_id: %d, max_pages: %d): %w", telegramID, maxPages, err)
+	}
+	return nil
+}
+
+func (r Postgres) SetMaterialsPreparedAt(ctx context.Context, telegramID int64, preparedAt time.Time) error {
+	query := r.psql.Update("users").
+		Set("materials_prepared_at", preparedAt).
+		Where("telegram_id = ?", telegramID)
+
+	sql, args, err := query.ToSql()
+	if err != nil {
+		return fmt.Errorf("build SQL query (telegram_id: %d, prepared_at: %v): %w", telegramID, preparedAt, err)
+	}
+
+	_, err = r.ExecContext(ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("set materials prepared at (telegram_id: %d, prepared_at: %v): %w", telegramID, preparedAt, err)
 	}
 	return nil
 }

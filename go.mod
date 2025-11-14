@@ -1,4 +1,4 @@
-module github.com/yourusername/master-english-srs
+module github.com/romanzh1/master-english-srs
 
 go 1.25.3
 

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/yourusername/master-english-srs/internal/models"
+	"github.com/romanzh1/master-english-srs/internal/models"
 )
 
 func (r Postgres) CreatePageReference(ctx context.Context, page *models.PageReference) error {
@@ -17,7 +17,7 @@ func (r Postgres) CreatePageReference(ctx context.Context, page *models.PageRefe
 		return fmt.Errorf("build SQL query (page_id: %s, user_id: %d): %w", page.PageID, page.UserID, err)
 	}
 
-	_, err = r.db.ExecContext(ctx, sql, args...)
+	_, err = r.ExecContext(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("create page reference (page_id: %s, user_id: %d, title: %s): %w", page.PageID, page.UserID, page.Title, err)
 	}
@@ -32,7 +32,7 @@ func (r Postgres) GetPageReference(ctx context.Context, pageID string, userID in
 	`
 
 	var page models.PageReference
-	err := r.db.GetContext(ctx, &page, query, pageID, userID)
+	err := r.GetContext(ctx, &page, query, pageID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get page reference (page_id: %s, user_id: %d): %w", pageID, userID, err)
 	}
@@ -44,7 +44,7 @@ func (r Postgres) GetUserPages(ctx context.Context, userID int64) ([]*models.Pag
 	query := `SELECT page_id, user_id, title, source, created_at, updated_at FROM page_references WHERE user_id = $1`
 
 	var pages []*models.PageReference
-	err := r.db.SelectContext(ctx, &pages, query, userID)
+	err := r.SelectContext(ctx, &pages, query, userID)
 	if err != nil {
 		return nil, fmt.Errorf("query user pages (user_id: %d): %w", userID, err)
 	}
@@ -61,7 +61,7 @@ func (r Postgres) DeleteUserPages(ctx context.Context, userID int64) error {
 		return fmt.Errorf("build SQL query (user_id: %d): %w", userID, err)
 	}
 
-	_, err = r.db.ExecContext(ctx, sql, args...)
+	_, err = r.ExecContext(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("delete user pages (user_id: %d): %w", userID, err)
 	}

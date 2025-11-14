@@ -6,7 +6,8 @@ import (
 	"time"
 
 	"github.com/Masterminds/squirrel"
-	"github.com/yourusername/master-english-srs/internal/models"
+	"github.com/romanzh1/master-english-srs/internal/models"
+	"github.com/romanzh1/master-english-srs/pkg/utils"
 )
 
 func (r Postgres) CreateProgress(ctx context.Context, progress *models.UserProgress) error {
@@ -19,7 +20,7 @@ func (r Postgres) CreateProgress(ctx context.Context, progress *models.UserProgr
 		return fmt.Errorf("build SQL query (user_id: %d, page_id: %s): %w", progress.UserID, progress.PageID, err)
 	}
 
-	_, err = r.db.ExecContext(ctx, sql, args...)
+	_, err = r.ExecContext(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("create progress (user_id: %d, page_id: %s): %w", progress.UserID, progress.PageID, err)
 	}
@@ -34,7 +35,7 @@ func (r Postgres) GetProgress(ctx context.Context, userID int64, pageID string) 
 	`
 
 	var progress models.UserProgress
-	err := r.db.GetContext(ctx, &progress, query, userID, pageID)
+	err := r.GetContext(ctx, &progress, query, userID, pageID)
 	if err != nil {
 		return nil, fmt.Errorf("get progress (user_id: %d, page_id: %s): %w", userID, pageID, err)
 	}
@@ -56,7 +57,7 @@ func (r Postgres) UpdateProgress(ctx context.Context, userID int64, pageID strin
 		return fmt.Errorf("build SQL query (user_id: %d, page_id: %s): %w", userID, pageID, err)
 	}
 
-	_, err = r.db.ExecContext(ctx, sql, args...)
+	_, err = r.ExecContext(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("update progress (user_id: %d, page_id: %s, repetition_count: %d): %w", userID, pageID, repetitionCount, err)
 	}
@@ -73,7 +74,7 @@ func (r Postgres) AddProgressHistory(ctx context.Context, userID int64, pageID s
 		return fmt.Errorf("build SQL query (user_id: %d, page_id: %s): %w", userID, pageID, err)
 	}
 
-	_, err = r.db.ExecContext(ctx, sql, args...)
+	_, err = r.ExecContext(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("add progress history (user_id: %d, page_id: %s, date: %s): %w", userID, pageID, history.Date.Format(time.RFC3339), err)
 	}
@@ -81,7 +82,8 @@ func (r Postgres) AddProgressHistory(ctx context.Context, userID int64, pageID s
 }
 
 func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64) ([]*models.UserProgress, error) {
-	now := time.Now().Truncate(24 * time.Hour).Add(24 * time.Hour)
+	now := utils.TruncateToMinutes(time.Now())
+	endOfDay := utils.StartOfDay(now).AddDate(0, 0, 1)
 
 	query := `
 		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate
@@ -91,9 +93,9 @@ func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64) ([]*models
 	`
 
 	var progressList []*models.UserProgress
-	err := r.db.SelectContext(ctx, &progressList, query, userID, now)
+	err := r.SelectContext(ctx, &progressList, query, userID, endOfDay)
 	if err != nil {
-		return nil, fmt.Errorf("query due pages (user_id: %d, cutoff_time: %s): %w", userID, now.Format(time.RFC3339), err)
+		return nil, fmt.Errorf("query due pages (user_id: %d, cutoff_time: %s): %w", userID, endOfDay.Format(time.RFC3339), err)
 	}
 
 	return progressList, nil
@@ -108,7 +110,7 @@ func (r Postgres) ProgressExists(ctx context.Context, userID int64, pageID strin
 	}
 
 	var count int
-	err = r.db.QueryRowContext(ctx, sql, args...).Scan(&count)
+	err = r.QueryRowxContext(ctx, sql, args...).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check progress exists (user_id: %d, page_id: %s): %w", userID, pageID, err)
 	}
@@ -119,7 +121,7 @@ func (r Postgres) GetAllProgressPageIDs(ctx context.Context, userID int64) ([]st
 	query := `SELECT page_id FROM user_progress WHERE user_id = $1`
 
 	var pageIDs []string
-	err := r.db.SelectContext(ctx, &pageIDs, query, userID)
+	err := r.SelectContext(ctx, &pageIDs, query, userID)
 	if err != nil {
 		return nil, fmt.Errorf("query all progress page IDs (user_id: %d): %w", userID, err)
 	}
@@ -143,7 +145,7 @@ func (r Postgres) GetPageIDsNotInProgress(ctx context.Context, userID int64, pag
 	}
 
 	var existingPageIDs []string
-	err = r.db.SelectContext(ctx, &existingPageIDs, sql, args...)
+	err = r.SelectContext(ctx, &existingPageIDs, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query existing page IDs (user_id: %d): %w", userID, err)
 	}

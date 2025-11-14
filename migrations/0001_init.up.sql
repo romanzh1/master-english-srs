@@ -1,19 +1,20 @@
 -- +goose Up
 CREATE TABLE IF NOT EXISTS users
 (
-    telegram_id           bigint PRIMARY KEY,
-    username              varchar(255),
-    level                 varchar(10),
-    onenote_access_token  text,
-    onenote_refresh_token text,
-    onenote_expires_at    timestamp,
-    onenote_auth_code     text,
-    onenote_notebook_id   varchar(255),
-    onenote_section_id    varchar(255),
-    use_manual_pages      boolean     DEFAULT FALSE,
-    reminder_time         varchar(10) DEFAULT '09:00',
-    max_pages_per_day     integer     DEFAULT 2,
-    created_at            timestamp   DEFAULT NOW()
+    telegram_id              bigint PRIMARY KEY,
+    username                 varchar(255),
+    level                    varchar(10),
+    onenote_access_token     text,
+    onenote_refresh_token    text,
+    onenote_expires_at       timestamp,
+    onenote_auth_code        text,
+    onenote_notebook_id      varchar(255),
+    onenote_section_id       varchar(255),
+    use_manual_pages         boolean     DEFAULT FALSE,
+    reminder_time            varchar(10) DEFAULT '09:00',
+    max_pages_per_day        integer     DEFAULT 2,
+    created_at               timestamp   DEFAULT NOW(),
+    materials_prepared_at    timestamp NULL
 );
 
 CREATE TABLE IF NOT EXISTS page_references

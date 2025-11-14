@@ -4,6 +4,8 @@ import (
 	"math/rand"
 	"slices"
 	"time"
+
+	"github.com/romanzh1/master-english-srs/pkg/utils"
 )
 
 type Grade string
@@ -52,7 +54,7 @@ func calculateInterval(interval int) (time.Time, int) {
 	now := time.Now().In(moscow)
 	t := now.AddDate(0, 0, interval)
 
-	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, moscow), interval
+	return utils.StartOfDay(t), interval
 }
 
 func GetInitialReviewDate() (time.Time, int) {
@@ -64,7 +66,7 @@ func GetInitialReviewDate() (time.Time, int) {
 	now := time.Now().In(moscow)
 	tomorrow := now.AddDate(0, 0, 1)
 
-	return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 0, 0, 0, 0, moscow), 1
+	return utils.StartOfDay(tomorrow), 1
 }
 
 // CalculatePagesToAdd determines how many pages to add to learning based on max pages per day
@@ -107,9 +109,4 @@ func ConvertGradeToStatus(grade int) Grade {
 		return hard
 	}
 	return forgot
-}
-
-func ShouldReviewToday(nextReviewDate time.Time) bool {
-	now := time.Now()
-	return nextReviewDate.Before(now) || nextReviewDate.Equal(now.Truncate(24*time.Hour))
 }

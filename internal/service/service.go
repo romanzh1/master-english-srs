@@ -10,9 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourusername/master-english-srs/internal/models"
-	"github.com/yourusername/master-english-srs/internal/service/srs"
-	"github.com/yourusername/master-english-srs/pkg/onenote"
+	"github.com/romanzh1/master-english-srs/internal/models"
+	"github.com/romanzh1/master-english-srs/internal/service/srs"
+	"github.com/romanzh1/master-english-srs/pkg/onenote"
+	"github.com/romanzh1/master-english-srs/pkg/utils"
 	"go.uber.org/zap"
 )
 
@@ -26,6 +27,8 @@ type Repository interface {
 	UpdateOneNoteConfig(ctx context.Context, telegramID int64, config *models.OneNoteConfig) error
 	UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, maxPages uint) error
 	GetAllUsersWithReminders(ctx context.Context) ([]*models.User, error)
+	SetMaterialsPreparedAt(ctx context.Context, telegramID int64, preparedAt time.Time) error
+	RunInTx(ctx context.Context, fn func(interface{}) error) error
 
 	CreatePageReference(ctx context.Context, page *models.PageReference) error
 	GetPageReference(ctx context.Context, pageID string, userID int64) (*models.PageReference, error)
@@ -579,7 +582,7 @@ func (s *Service) UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, ma
 	return nil
 }
 
-func (s *Service) AddPagesToLearning(ctx context.Context, telegramID int64) error {
+func (s *Service) addPagesToLearning(ctx context.Context, telegramID int64) error {
 	user, err := s.repo.GetUser(ctx, telegramID)
 	if err != nil {
 		return fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
@@ -638,38 +641,87 @@ func (s *Service) AddPagesToLearning(ctx context.Context, telegramID int64) erro
 		notInProgress = notInProgress[:pagesToAdd]
 	}
 
-	for _, pageID := range notInProgress {
-		nextReview, interval := srs.GetInitialReviewDate()
-		progress := &models.UserProgress{
-			UserID:          telegramID,
-			PageID:          pageID,
-			Level:           user.Level,
-			RepetitionCount: 0,
-			NextReviewDate:  nextReview,
-			IntervalDays:    interval,
-			SuccessRate:     0,
+	preparedAt := time.Now()
+	err = s.repo.RunInTx(ctx, func(txRepo interface{}) error {
+		repo := txRepo.(Repository)
+		for _, pageID := range notInProgress {
+			nextReview, interval := srs.GetInitialReviewDate()
+			progress := &models.UserProgress{
+				UserID:          telegramID,
+				PageID:          pageID,
+				Level:           user.Level,
+				RepetitionCount: 0,
+				NextReviewDate:  nextReview,
+				IntervalDays:    interval,
+				SuccessRate:     0,
+			}
+
+			if err := repo.CreateProgress(ctx, progress); err != nil {
+				zap.S().Error("create progress in tx", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", pageID))
+				return fmt.Errorf("create progress in tx: %w", err)
+			}
 		}
 
-		if err := s.repo.CreateProgress(ctx, progress); err != nil {
-			zap.S().Error("create progress", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", pageID))
-			continue
+		if err := repo.SetMaterialsPreparedAt(ctx, telegramID, preparedAt); err != nil {
+			zap.S().Error("set materials prepared at in tx", zap.Error(err), zap.Int64("telegram_id", telegramID))
+			return fmt.Errorf("set materials prepared at in tx: %w", err)
 		}
+
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("run in transaction: %w", err)
 	}
 
 	return nil
 }
 
-// RunDailyCron runs daily cron job at 00:00 Moscow time
-// For all users, it adds new pages to learning and updates next_review_date
+func (s *Service) PrepareMaterials(ctx context.Context, telegramID int64) error {
+	user, err := s.repo.GetUser(ctx, telegramID)
+	if err != nil {
+		return fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
+	}
+
+	if user.OneNoteConfig == nil {
+		return fmt.Errorf("onenote not configured (telegram_id: %d)", telegramID)
+	}
+
+	_, err = s.syncPagesInternal(ctx, telegramID)
+	if err != nil {
+		if _, ok := err.(*AuthRequiredError); ok {
+			return err
+		}
+		zap.S().Warn("failed to sync pages in prepare materials", zap.Error(err), zap.Int64("telegram_id", telegramID))
+	}
+
+	if err := s.addPagesToLearning(ctx, telegramID); err != nil {
+		return fmt.Errorf("add pages to learning: %w", err)
+	}
+
+	return nil
+}
+
 func (s *Service) RunDailyCron(ctx context.Context) error {
 	users, err := s.repo.GetAllUsersWithReminders(ctx)
 	if err != nil {
 		return fmt.Errorf("get all users: %w", err)
 	}
 
+	now := utils.TruncateToMinutes(time.Now())
+	today := utils.StartOfDay(now)
+
 	for _, user := range users {
 		if user.OneNoteConfig == nil {
 			continue
+		}
+
+		if user.MaterialsPreparedAt != nil {
+			preparedDate := utils.StartOfDay(*user.MaterialsPreparedAt)
+			if utils.DatesEqual(preparedDate, today) {
+				zap.S().Info("skipping user with materials already prepared today", zap.Int64("telegram_id", user.TelegramID))
+				continue
+			}
 		}
 
 		_, err := s.syncPagesInternal(ctx, user.TelegramID)
@@ -681,7 +733,7 @@ func (s *Service) RunDailyCron(ctx context.Context) error {
 			zap.S().Warn("failed to sync pages in daily cron", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
 		}
 
-		if err := s.AddPagesToLearning(ctx, user.TelegramID); err != nil {
+		if err := s.addPagesToLearning(ctx, user.TelegramID); err != nil {
 			zap.S().Error("add pages to learning in daily cron", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
 			continue
 		}

@@ -8,9 +8,10 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"github.com/yourusername/master-english-srs/internal/models"
-	"github.com/yourusername/master-english-srs/internal/service"
-	"github.com/yourusername/master-english-srs/pkg/onenote"
+	"github.com/romanzh1/master-english-srs/internal/models"
+	"github.com/romanzh1/master-english-srs/internal/service"
+	"github.com/romanzh1/master-english-srs/pkg/onenote"
+	"github.com/romanzh1/master-english-srs/pkg/utils"
 	"go.uber.org/zap"
 )
 
@@ -35,6 +36,7 @@ type Service interface {
 	UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, maxPages uint) error
 	GetProgress(ctx context.Context, telegramID int64, pageID string) (*models.UserProgress, error)
 	RunDailyCron(ctx context.Context) error
+	PrepareMaterials(ctx context.Context, telegramID int64) error
 }
 
 type TelegramHandler struct {
@@ -72,6 +74,8 @@ func (h *TelegramHandler) handleCommand(ctx context.Context, update tgbotapi.Upd
 		h.handleSetMaxPages(ctx, update)
 	case "get_max_pages":
 		h.handleGetMaxPages(ctx, update)
+	case "prepare_materials":
+		h.handlePrepareMaterials(ctx, update)
 	case "help":
 		h.handleHelp(ctx, update)
 	default:
@@ -506,6 +510,7 @@ func (h *TelegramHandler) handleHelp(ctx context.Context, update tgbotapi.Update
 		/pages - Список всех страниц
 		/set_max_pages - Установить максимальное количество страниц в день (2, 3 или 4)
 		/get_max_pages - Показать текущее максимальное количество страниц в день
+		/prepare_materials - Подгрузить дополнительный материал на сегодня
 		/help - Справка
 
 		Примечание: Страницы синхронизируются автоматически при запросе.`
@@ -817,26 +822,86 @@ func (h *TelegramHandler) handleGetMaxPages(ctx context.Context, update tgbotapi
 	h.sendMessage(chatID, fmt.Sprintf("📊 Текущее максимальное количество страниц в день: %d", maxPages))
 }
 
-// startDailyCron runs daily cron job at 00:00 Moscow time
-func (h *TelegramHandler) startDailyCron() {
-	moscow, err := time.LoadLocation("Europe/Moscow")
+func (h *TelegramHandler) handlePrepareMaterials(ctx context.Context, update tgbotapi.Update) {
+	userID := update.Message.From.ID
+	chatID := update.Message.Chat.ID
+
+	exists, err := h.service.UserExists(ctx, userID)
 	if err != nil {
-		zap.S().Error("load moscow location", zap.Error(err))
-		moscow = time.UTC
+		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
 	}
 
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
+	if !exists {
+		h.sendMessage(chatID, "Сначала зарегистрируйся с помощью команды /start")
+		return
+	}
+
+	user, err := h.service.GetUser(ctx, userID)
+	if err != nil {
+		zap.S().Error("get user", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	if user.AccessToken == nil || user.RefreshToken == nil {
+		h.sendMessage(chatID, "Сначала подключи OneNote с помощью команды /connect_onenote")
+		return
+	}
+
+	if user.NotebookID == nil || *user.NotebookID == "" {
+		h.sendMessage(chatID, "Сначала выбери книгу OneNote с помощью команды /select_notebook")
+		return
+	}
+
+	warningMsg := "⚠️ Внимание! Эта команда добавляет материалы для повторения.\n" +
+		"Не рекомендуется использовать её часто, иначе материалы будут накапливаться и в будущем придётся повторять слишком много за один день.\n\n" +
+		"Обычно материалы подготавливаются автоматически в 00:00 каждый день.\n\n" +
+		"Подготавливаю материалы..."
+
+	h.sendMessage(chatID, warningMsg)
+
+	if err := h.service.PrepareMaterials(ctx, userID); err != nil {
+		if h.handleAuthError(err, userID, chatID) {
+			return
+		}
+		zap.S().Error("prepare materials", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Не удалось подготовить материалы. Попробуй позже.")
+		return
+	}
+
+	h.sendMessage(chatID, "✅ Материалы успешно подготовлены!")
+}
+
+func (h *TelegramHandler) startDailyCron() {
+	zone, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		zap.S().Error("load moscow location", zap.Error(err))
+		zone = time.UTC
+	}
+
+	getNextMidnight := func() time.Time {
+		now := utils.TruncateToMinutes(time.Now().In(zone))
+		today := utils.StartOfDay(now)
+
+		return today.AddDate(0, 0, 1)
+	}
+
+	nextRun := getNextMidnight()
+	timer := time.NewTimer(time.Until(nextRun))
 
 	var lastRunDate time.Time
 
-	for range ticker.C {
-		now := time.Now().In(moscow)
-		currentDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, moscow)
+	for {
+		<-timer.C
 
-		// Check if it's 00:00 and we haven't run today
-		if now.Hour() == 0 && now.Minute() == 0 && !lastRunDate.Equal(currentDate) {
+		now := utils.TruncateToMinutes(time.Now().In(zone)) //TODO rewrite zone to method
+		currentDate := utils.StartOfDay(now)
+
+		if now.Hour() == 0 && now.Minute() == 0 && !utils.DatesEqual(lastRunDate, currentDate) {
 			ctx := context.Background()
+
 			if err := h.service.RunDailyCron(ctx); err != nil {
 				zap.S().Error("run daily cron", zap.Error(err))
 			} else {
@@ -844,6 +909,9 @@ func (h *TelegramHandler) startDailyCron() {
 				zap.S().Info("daily cron completed successfully")
 			}
 		}
+
+		nextRun = getNextMidnight()
+		timer.Reset(time.Until(nextRun))
 	}
 }
 

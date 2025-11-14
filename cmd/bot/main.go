@@ -5,16 +5,15 @@ import (
 	"os"
 
 	"github.com/joho/godotenv"
-	"github.com/yourusername/master-english-srs/internal/handler"
-	"github.com/yourusername/master-english-srs/internal/repository"
-	"github.com/yourusername/master-english-srs/internal/service"
-	"github.com/yourusername/master-english-srs/pkg/onenote"
+	"github.com/romanzh1/master-english-srs/internal/handler"
+	"github.com/romanzh1/master-english-srs/internal/repository"
+	"github.com/romanzh1/master-english-srs/internal/service"
+	"github.com/romanzh1/master-english-srs/pkg/onenote"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
 func main() {
-	// Initialize zap logger
 	config := zap.NewDevelopmentConfig()
 	config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	config.EncoderConfig.TimeKey = "timestamp"
@@ -26,7 +25,6 @@ func main() {
 	}
 	defer logger.Sync()
 
-	// Replace global logger
 	zap.ReplaceGlobals(logger)
 	zap.S().Info("logger initialized")
 

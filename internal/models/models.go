@@ -12,13 +12,14 @@ type User struct {
 	ReminderTime   string         `db:"reminder_time"`
 	CreatedAt      time.Time      `db:"created_at"`
 
-	AccessToken    *string    `db:"onenote_access_token"`
-	RefreshToken   *string    `db:"onenote_refresh_token"`
-	ExpiresAt      *time.Time `db:"onenote_expires_at"`
-	AuthCode       *string    `db:"onenote_auth_code"`
-	NotebookID     *string    `db:"onenote_notebook_id"`
-	SectionID      *string    `db:"onenote_section_id"`
-	MaxPagesPerDay *uint      `db:"max_pages_per_day"`
+	AccessToken         *string    `db:"onenote_access_token"`
+	RefreshToken        *string    `db:"onenote_refresh_token"`
+	ExpiresAt           *time.Time `db:"onenote_expires_at"`
+	AuthCode            *string    `db:"onenote_auth_code"`
+	NotebookID          *string    `db:"onenote_notebook_id"`
+	SectionID           *string    `db:"onenote_section_id"`
+	MaxPagesPerDay      *uint      `db:"max_pages_per_day"`
+	MaterialsPreparedAt *time.Time `db:"materials_prepared_at"`
 }
 
 type OneNoteAuth struct {
