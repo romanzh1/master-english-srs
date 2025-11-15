@@ -30,7 +30,7 @@ type Service interface {
 	SaveOneNoteConfig(ctx context.Context, telegramID int64, notebookID, sectionID string) error
 
 	GetDuePagesToday(ctx context.Context, telegramID int64) ([]*models.PageWithProgress, error)
-	GetUserPages(ctx context.Context, telegramID int64) ([]*models.PageReference, error)
+	GetUserPagesInProgress(ctx context.Context, telegramID int64) ([]*models.PageReference, error)
 	GetPageContent(ctx context.Context, telegramID int64, pageID string) (string, error)
 	UpdateReviewProgress(ctx context.Context, telegramID int64, pageID string, grade int) error
 	UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, maxPages uint) error
@@ -465,7 +465,7 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 		return
 	}
 
-	pages, err := h.service.GetUserPages(ctx, userID)
+	pages, err := h.service.GetUserPagesInProgress(ctx, userID)
 	if err != nil {
 		if h.handleAuthError(err, userID, chatID) {
 			return

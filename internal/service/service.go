@@ -32,7 +32,7 @@ type Repository interface {
 
 	CreatePageReference(ctx context.Context, page *models.PageReference) error
 	GetPageReference(ctx context.Context, pageID string, userID int64) (*models.PageReference, error)
-	GetUserPages(ctx context.Context, userID int64) ([]*models.PageReference, error)
+	GetUserPagesInProgress(ctx context.Context, userID int64) ([]*models.PageReference, error)
 	DeleteUserPages(ctx context.Context, userID int64) error
 
 	CreateProgress(ctx context.Context, progress *models.UserProgress) error
@@ -274,7 +274,7 @@ func (s *Service) syncPagesInternal(ctx context.Context, telegramID int64) (int,
 	}
 
 	if err := s.repo.DeleteUserPages(ctx, telegramID); err != nil {
-		zap.S().Error("delete user pages", zap.Error(err), zap.Int64("telegram_id", telegramID))
+		return 0, fmt.Errorf("delete user pages (telegram_id: %d): %w", telegramID, err)
 	}
 
 	for _, page := range pages {
@@ -427,7 +427,7 @@ func (s *Service) GetDuePagesToday(ctx context.Context, telegramID int64) ([]*mo
 	return result, nil
 }
 
-func (s *Service) GetUserPages(ctx context.Context, telegramID int64) ([]*models.PageReference, error) {
+func (s *Service) GetUserPagesInProgress(ctx context.Context, telegramID int64) ([]*models.PageReference, error) {
 	user, err := s.repo.GetUser(ctx, telegramID)
 	if err != nil {
 		return nil, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
@@ -462,6 +462,10 @@ func (s *Service) GetUserPages(ctx context.Context, telegramID int64) ([]*models
 
 	result := make([]*models.PageReference, 0, len(onenotePages))
 	for _, page := range onenotePages {
+		if page.ID == "" {
+			continue
+		}
+
 		if strings.Contains(page.Title, "*") {
 			continue
 		}

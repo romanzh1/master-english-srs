@@ -40,7 +40,7 @@ func (r Postgres) GetPageReference(ctx context.Context, pageID string, userID in
 	return &page, nil
 }
 
-func (r Postgres) GetUserPages(ctx context.Context, userID int64) ([]*models.PageReference, error) {
+func (r Postgres) GetUserPagesInProgress(ctx context.Context, userID int64) ([]*models.PageReference, error) {
 	query := `SELECT page_id, user_id, title, source, created_at, updated_at FROM page_references WHERE user_id = $1`
 
 	var pages []*models.PageReference

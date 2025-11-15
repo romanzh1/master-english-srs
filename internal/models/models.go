@@ -50,7 +50,7 @@ type UserProgress struct {
 	LastReviewDate  time.Time         `db:"last_review_date"`
 	NextReviewDate  time.Time         `db:"next_review_date"`
 	IntervalDays    int               `db:"interval_days"`
-	SuccessRate     float64           `db:"success_rate"`
+	SuccessRate     int               `db:"success_rate"`
 	History         []ProgressHistory `db:"-"`
 }
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/romanzh1/master-english-srs/pkg/utils"
+	"go.uber.org/zap"
 )
 
 type Grade string
@@ -21,7 +22,12 @@ var defaultIntervals = []int{1, 3, 7, 14, 30, 90, 180}
 
 func CalculateNextReviewDate(currentIntervalDays int, success Grade) (time.Time, int) {
 	interval := slices.Index(defaultIntervals, currentIntervalDays)
-	// TODO add error for wrong success
+
+	// Если интервал не найден, используем первый интервал как fallback
+	if interval == -1 {
+		zap.L().Error("Interval not found, using default", zap.Int("requested_days", currentIntervalDays))
+		return calculateInterval(defaultIntervals[0])
+	}
 
 	switch success {
 	case forgot:
@@ -35,7 +41,7 @@ func CalculateNextReviewDate(currentIntervalDays int, success Grade) (time.Time,
 	case normal:
 		return calculateInterval(defaultIntervals[interval])
 	case hard:
-		if interval == 1 {
+		if interval == 0 {
 			return calculateInterval(defaultIntervals[interval])
 		}
 
