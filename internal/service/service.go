@@ -278,7 +278,6 @@ func (s *Service) syncPagesInternal(ctx context.Context, telegramID int64) (int,
 	}
 
 	for _, page := range pages {
-		// Пропускаем страницы с * в заголовке (страницы на доработке)
 		if strings.Contains(page.Title, "*") {
 			continue
 		}

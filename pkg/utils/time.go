@@ -19,3 +19,7 @@ func TimesEqualUpToMinutes(t1, t2 time.Time) bool {
 func DatesEqual(t1, t2 time.Time) bool {
 	return StartOfDay(t1).Equal(StartOfDay(t2))
 }
+
+func GetMoscowTime() time.Time {
+	return time.Now().In(time.FixedZone("UTC+3", 3*60*60))
+}

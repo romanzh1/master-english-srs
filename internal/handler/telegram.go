@@ -238,10 +238,11 @@ func (h *TelegramHandler) handleSelectNotebook(ctx context.Context, update tgbot
 	text := "📚 Выбери книгу OneNote для синхронизации:\n\n"
 	var buttons [][]tgbotapi.InlineKeyboardButton
 
-	for _, notebook := range notebooks {
+	for i, notebook := range notebooks {
+		callbackData := fmt.Sprintf("notebook_%d", i)
 		button := tgbotapi.NewInlineKeyboardButtonData(
 			notebook.DisplayName,
-			fmt.Sprintf("notebook_%s", notebook.ID),
+			callbackData,
 		)
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardRow(button))
 	}
@@ -303,10 +304,11 @@ func (h *TelegramHandler) handleSelectSection(ctx context.Context, update tgbota
 	text := "📑 Выбери секцию OneNote для синхронизации:\n\n"
 	var buttons [][]tgbotapi.InlineKeyboardButton
 
-	for _, section := range sections {
+	for i, section := range sections {
+		callbackData := fmt.Sprintf("section_%d", i)
 		button := tgbotapi.NewInlineKeyboardButtonData(
 			section.DisplayName,
-			fmt.Sprintf("section_%s", section.ID),
+			callbackData,
 		)
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardRow(button))
 	}
@@ -434,9 +436,10 @@ func (h *TelegramHandler) handleToday(ctx context.Context, update tgbotapi.Updat
 				i+1, escapedTitle, daysSince, pwp.Progress.RepetitionCount)
 		}
 
+		callbackData := fmt.Sprintf("show_%d", i)
 		button := tgbotapi.NewInlineKeyboardButtonData(
 			fmt.Sprintf("Показать страницу %d", i+1),
-			fmt.Sprintf("show_%s", pwp.Page.PageID),
+			callbackData,
 		)
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardRow(button))
 	}
@@ -476,7 +479,7 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 	}
 
 	if len(pages) == 0 {
-		h.sendMessage(chatID, "У тебя пока нет страниц. Используй /connect_onenote для подключения OneNote.")
+		h.sendMessage(chatID, "У тебя пока нет страниц, приходи завтра или используй /prepare_materials.")
 		return
 	}
 
@@ -490,7 +493,7 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 
 		// Экранируем название страницы для безопасной вставки в HTML
 		escapedTitle := escapeHTML(page.Title)
-		text += fmt.Sprintf("• %s\n   Повторений: %d | Интервал: %d дней\n\n",
+		text += fmt.Sprintf("%s\n   Повторений: %d | Интервал: %d дней\n\n",
 			escapedTitle, progress.RepetitionCount, progress.IntervalDays)
 	}
 
@@ -506,14 +509,14 @@ func (h *TelegramHandler) handleHelp(ctx context.Context, update tgbotapi.Update
 		/connect_onenote - Подключить OneNote
 		/select_notebook - Выбрать книгу OneNote для синхронизации
 		/select_section - Выбрать секцию OneNote для синхронизации
+
 		/today - Показать страницы на сегодня
 		/pages - Список всех страниц
-		/set_max_pages - Установить максимальное количество страниц в день (2, 3 или 4)
-		/get_max_pages - Показать текущее максимальное количество страниц в день
-		/prepare_materials - Подгрузить дополнительный материал на сегодня
-		/help - Справка
+		/set_max_pages - Установить максимальное количество страниц в день на повторение
+		/get_max_pages - Показать текущее максимальное количество страниц в день для повторения
+		/prepare_materials - Подгрузить дополнительную страницу на сегодня
 
-		Примечание: Страницы синхронизируются автоматически при запросе.`
+		/help - Справка`
 
 	h.sendMessage(update.Message.Chat.ID, text)
 }
@@ -596,7 +599,7 @@ func (h *TelegramHandler) handleLevelSelection(ctx context.Context, callback *tg
 
 func (h *TelegramHandler) handleNotebookSelection(ctx context.Context, callback *tgbotapi.CallbackQuery) {
 	userID := callback.From.ID
-	notebookID := strings.TrimPrefix(callback.Data, "notebook_")
+	indexStr := strings.TrimPrefix(callback.Data, "notebook_")
 	chatID := callback.Message.Chat.ID
 
 	// Получаем пользователя, чтобы узнать текущий sectionID (если есть)
@@ -606,6 +609,32 @@ func (h *TelegramHandler) handleNotebookSelection(ctx context.Context, callback 
 		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
 		return
 	}
+
+	// Проверяем, что пользователь авторизован
+	if user.AccessToken == nil || user.RefreshToken == nil {
+		h.sendMessage(chatID, "Сначала подключи OneNote с помощью команды /connect_onenote")
+		return
+	}
+
+	// Получаем список notebooks и находим нужный по индексу
+	notebooks, err := h.service.GetOneNoteNotebooks(ctx, userID)
+	if err != nil {
+		if h.handleAuthError(err, userID, chatID) {
+			return
+		}
+		zap.S().Error("get notebooks", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Не удалось получить список книг. Попробуй позже.")
+		return
+	}
+
+	index, err := strconv.Atoi(indexStr)
+	if err != nil || index < 0 || index >= len(notebooks) {
+		zap.S().Error("invalid notebook index", zap.String("index", indexStr), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Неверный выбор. Попробуй заново через /select_notebook")
+		return
+	}
+
+	notebookID := notebooks[index].ID
 
 	// Сохраняем только notebookID, sectionID оставляем как есть (или nil, если его нет)
 	sectionID := ""
@@ -625,7 +654,7 @@ func (h *TelegramHandler) handleNotebookSelection(ctx context.Context, callback 
 
 func (h *TelegramHandler) handleSectionSelection(ctx context.Context, callback *tgbotapi.CallbackQuery) {
 	userID := callback.From.ID
-	sectionID := strings.TrimPrefix(callback.Data, "section_")
+	indexStr := strings.TrimPrefix(callback.Data, "section_")
 	chatID := callback.Message.Chat.ID
 
 	// Получаем пользователя, чтобы узнать текущий notebookID
@@ -642,6 +671,32 @@ func (h *TelegramHandler) handleSectionSelection(ctx context.Context, callback *
 		return
 	}
 
+	// Проверяем, что пользователь авторизован
+	if user.AccessToken == nil || user.RefreshToken == nil {
+		h.sendMessage(chatID, "Сначала подключи OneNote с помощью команды /connect_onenote")
+		return
+	}
+
+	// Получаем список sections и находим нужную по индексу
+	sections, err := h.service.GetOneNoteSections(ctx, userID, *user.NotebookID)
+	if err != nil {
+		if h.handleAuthError(err, userID, chatID) {
+			return
+		}
+		zap.S().Error("get sections", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Не удалось получить список секций. Попробуй позже.")
+		return
+	}
+
+	index, err := strconv.Atoi(indexStr)
+	if err != nil || index < 0 || index >= len(sections) {
+		zap.S().Error("invalid section index", zap.String("index", indexStr), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Неверный выбор. Попробуй заново через /select_section")
+		return
+	}
+
+	sectionID := sections[index].ID
+
 	if err := h.service.SaveOneNoteConfig(ctx, userID, *user.NotebookID, sectionID); err != nil {
 		zap.S().Error("save section config", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("section_id", sectionID))
 		h.sendMessage(chatID, "Не удалось сохранить выбранную секцию. Попробуй позже.")
@@ -653,9 +708,29 @@ func (h *TelegramHandler) handleSectionSelection(ctx context.Context, callback *
 }
 
 func (h *TelegramHandler) handleShowPage(ctx context.Context, callback *tgbotapi.CallbackQuery) {
-	pageID := strings.TrimPrefix(callback.Data, "show_")
+	indexStr := strings.TrimPrefix(callback.Data, "show_")
 	userID := callback.From.ID
 	chatID := callback.Message.Chat.ID
+
+	// Получаем список страниц для повторения и находим нужную по индексу
+	duePages, err := h.service.GetDuePagesToday(ctx, userID)
+	if err != nil {
+		if h.handleAuthError(err, userID, chatID) {
+			return
+		}
+		zap.S().Error("get due pages today", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Не удалось получить список страниц. Попробуй заново через /today")
+		return
+	}
+
+	index, err := strconv.Atoi(indexStr)
+	if err != nil || index < 0 || index >= len(duePages) {
+		zap.S().Error("invalid page index", zap.String("index", indexStr), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Неверный выбор. Попробуй заново через /today")
+		return
+	}
+
+	pageID := duePages[index].Page.PageID
 
 	content, err := h.service.GetPageContent(ctx, userID, pageID)
 	if err != nil {
@@ -673,14 +748,20 @@ func (h *TelegramHandler) handleShowPage(ctx context.Context, callback *tgbotapi
 	text += "💡 Скопируй эту страницу и отправь в бота Poe для генерации задания.\n\n"
 	text += "После прохождения задания отметь результат:"
 
+	// Передаём индекс страницы в кнопки оценки
+	callbackData1 := fmt.Sprintf("grade_80_100_%d", index)
+	callbackData2 := fmt.Sprintf("grade_60_80_%d", index)
+	callbackData3 := fmt.Sprintf("grade_40_60_%d", index)
+	callbackData4 := fmt.Sprintf("grade_0_40_%d", index)
+
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("✅ Easy (>80%)", fmt.Sprintf("grade_80_100_%s", pageID)),
-			tgbotapi.NewInlineKeyboardButtonData("🟢 Normal (>60%)", fmt.Sprintf("grade_60_80_%s", pageID)),
+			tgbotapi.NewInlineKeyboardButtonData("✅ Easy (>80%)", callbackData1),
+			tgbotapi.NewInlineKeyboardButtonData("🟢 Normal (>60%)", callbackData2),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🟡 Hard (>40%)", fmt.Sprintf("grade_40_60_%s", pageID)),
-			tgbotapi.NewInlineKeyboardButtonData("🔴 Forgot (<40%)", fmt.Sprintf("grade_0_40_%s", pageID)),
+			tgbotapi.NewInlineKeyboardButtonData("🟡 Hard (>40%)", callbackData3),
+			tgbotapi.NewInlineKeyboardButtonData("🔴 Forgot (<40%)", callbackData4),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("↩️ Пропустить", "skip_all"),
@@ -691,27 +772,86 @@ func (h *TelegramHandler) handleShowPage(ctx context.Context, callback *tgbotapi
 }
 
 func (h *TelegramHandler) handleGradeReview(ctx context.Context, callback *tgbotapi.CallbackQuery, grade int) {
-	// Extract pageID from callback data
+	// Extract page index from callback data
 	data := callback.Data
-	var pageID string
+	userID := callback.From.ID
+	chatID := callback.Message.Chat.ID
+
+	var indexStr string
 	if strings.HasPrefix(data, "grade_80_100_") {
-		pageID = strings.TrimPrefix(data, "grade_80_100_")
+		indexStr = strings.TrimPrefix(data, "grade_80_100_")
 	} else if strings.HasPrefix(data, "grade_60_80_") {
-		pageID = strings.TrimPrefix(data, "grade_60_80_")
+		indexStr = strings.TrimPrefix(data, "grade_60_80_")
 	} else if strings.HasPrefix(data, "grade_40_60_") {
-		pageID = strings.TrimPrefix(data, "grade_40_60_")
+		indexStr = strings.TrimPrefix(data, "grade_40_60_")
 	} else if strings.HasPrefix(data, "grade_0_40_") {
-		pageID = strings.TrimPrefix(data, "grade_0_40_")
-	} else if strings.HasPrefix(data, "success_") {
-		pageID = strings.TrimPrefix(data, "success_")
-	} else if strings.HasPrefix(data, "failure_") {
-		pageID = strings.TrimPrefix(data, "failure_")
+		indexStr = strings.TrimPrefix(data, "grade_0_40_")
+	} else if strings.HasPrefix(data, "success_") || strings.HasPrefix(data, "failure_") {
+		// Legacy support - старые callback могут содержать обрезанный pageID
+		// Пытаемся восстановить по префиксу (для обратной совместимости)
+		pageIDPrefix := ""
+		if strings.HasPrefix(data, "success_") {
+			pageIDPrefix = strings.TrimPrefix(data, "success_")
+			grade = 90
+		} else {
+			pageIDPrefix = strings.TrimPrefix(data, "failure_")
+			grade = 30
+		}
+
+		// Восстанавливаем pageID из списка страниц по префиксу
+		duePages, err := h.service.GetDuePagesToday(ctx, userID)
+		if err != nil {
+			if h.handleAuthError(err, userID, chatID) {
+				return
+			}
+			zap.S().Error("get due pages today for legacy callback", zap.Error(err), zap.Int64("telegram_id", userID))
+			h.sendMessage(chatID, "Не удалось найти страницу. Попробуй заново через /today")
+			return
+		}
+
+		var pageID string
+		found := false
+		for _, pwp := range duePages {
+			if strings.HasPrefix(pwp.Page.PageID, pageIDPrefix) {
+				pageID = pwp.Page.PageID
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			zap.S().Warn("page ID not found for legacy callback prefix", zap.String("prefix", pageIDPrefix), zap.Int64("telegram_id", userID))
+			h.sendMessage(chatID, "Не удалось найти страницу. Попробуй заново через /today")
+			return
+		}
+
+		h.updateReviewProgress(ctx, userID, chatID, pageID, grade)
+		return
 	} else {
 		zap.S().Warn("unknown grade callback format", zap.String("data", data))
 		return
 	}
 
-	h.updateReviewProgress(ctx, callback.From.ID, callback.Message.Chat.ID, pageID, grade)
+	// Получаем список страниц для повторения и находим нужную по индексу
+	duePages, err := h.service.GetDuePagesToday(ctx, userID)
+	if err != nil {
+		if h.handleAuthError(err, userID, chatID) {
+			return
+		}
+		zap.S().Error("get due pages today", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Не удалось получить список страниц. Попробуй заново через /today")
+		return
+	}
+
+	index, err := strconv.Atoi(indexStr)
+	if err != nil || index < 0 || index >= len(duePages) {
+		zap.S().Error("invalid page index", zap.String("index", indexStr), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Неверный выбор. Попробуй заново через /today")
+		return
+	}
+
+	pageID := duePages[index].Page.PageID
+	h.updateReviewProgress(ctx, userID, chatID, pageID, grade)
 }
 
 func (h *TelegramHandler) handleReviewSuccess(ctx context.Context, callback *tgbotapi.CallbackQuery) {
@@ -771,7 +911,7 @@ func (h *TelegramHandler) handleSetMaxPages(ctx context.Context, update tgbotapi
 	// Parse number from message text after command
 	parts := strings.Fields(update.Message.Text)
 	if len(parts) < 2 {
-		h.sendMessage(chatID, "Использование: /set_max_pages <число>\n\nНапример: /set_max_pages 3\n\nДоступные значения: 2, 3 или 4")
+		h.sendMessage(chatID, "Использование: /set_max_pages <b>число</b>\n\nНапример: /set_max_pages 3\n\nРекомендуемые значения: 2, 3 или 4")
 		return
 	}
 
@@ -945,7 +1085,7 @@ func (h *TelegramHandler) sendMessageWithKeyboard(chatID int64, text string, key
 }
 
 func (h *TelegramHandler) startReminderScheduler() {
-	ticker := time.NewTicker(1 * time.Hour)
+	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -963,9 +1103,20 @@ func (h *TelegramHandler) checkAndSendReminders() {
 	}
 
 	for _, user := range users {
+		reminder, err := time.Parse("15:04", user.ReminderTime)
+		if err != nil {
+			zap.S().Error("parse reminder time", zap.Error(err), zap.Int64("telegram_id", user.TelegramID), zap.String("reminder_time", user.ReminderTime))
+			continue
+		}
+
+		now := utils.GetMoscowTime()
+
+		if reminder.Hour() != now.Hour() && reminder.Minute() != now.Minute() {
+			continue
+		}
+
 		duePages, err := h.service.GetDuePagesToday(ctx, user.TelegramID)
 		if err != nil {
-			// Если требуется авторизация, пропускаем этого пользователя (не отправляем уведомление)
 			if _, ok := err.(*service.AuthRequiredError); ok {
 				zap.S().Warn("authentication required for reminder", zap.Int64("telegram_id", user.TelegramID))
 				continue
