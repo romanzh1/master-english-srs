@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS user_progress
     next_review_date timestamp,
     interval_days    integer,
     success_rate     integer,
-    history          jsonb   DEFAULT '[]'::jsonb,
+    reviewed_today   boolean  DEFAULT FALSE,
     PRIMARY KEY (user_id, page_id),
     FOREIGN KEY (user_id) REFERENCES users (telegram_id)
         ON DELETE CASCADE

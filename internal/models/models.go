@@ -43,15 +43,15 @@ type PageReference struct {
 }
 
 type UserProgress struct {
-	UserID          int64             `db:"user_id"`
-	PageID          string            `db:"page_id"`
-	Level           string            `db:"level"`
-	RepetitionCount int               `db:"repetition_count"`
-	LastReviewDate  time.Time         `db:"last_review_date"`
-	NextReviewDate  time.Time         `db:"next_review_date"`
-	IntervalDays    int               `db:"interval_days"`
-	SuccessRate     int               `db:"success_rate"`
-	History         []ProgressHistory `db:"-"`
+	UserID          int64     `db:"user_id"`
+	PageID          string    `db:"page_id"`
+	Level           string    `db:"level"`
+	RepetitionCount int       `db:"repetition_count"`
+	LastReviewDate  time.Time `db:"last_review_date"`
+	NextReviewDate  time.Time `db:"next_review_date"`
+	IntervalDays    int       `db:"interval_days"`
+	SuccessRate     int       `db:"success_rate"`
+	ReviewedToday   bool      `db:"reviewed_today"`
 }
 
 type ProgressHistory struct {

@@ -37,12 +37,15 @@ type Repository interface {
 
 	CreateProgress(ctx context.Context, progress *models.UserProgress) error
 	GetProgress(ctx context.Context, userID int64, pageID string) (*models.UserProgress, error)
-	UpdateProgress(ctx context.Context, userID int64, pageID string, level string, repetitionCount int, lastReviewDate, nextReviewDate time.Time, intervalDays int) error
+	UpdateProgress(ctx context.Context, userID int64, pageID string, level string, repetitionCount int, lastReviewDate, nextReviewDate time.Time, intervalDays int, reviewedToday bool) error
 	AddProgressHistory(ctx context.Context, userID int64, pageID string, history models.ProgressHistory) error
 	GetDuePagesToday(ctx context.Context, userID int64) ([]*models.UserProgress, error)
 	GetAllProgressPageIDs(ctx context.Context, userID int64) ([]string, error)
 	GetPageIDsNotInProgress(ctx context.Context, userID int64, pageIDs []string) ([]string, error)
 	ProgressExists(ctx context.Context, userID int64, pageID string) (bool, error)
+	ResetReviewedTodayFlag(ctx context.Context, userID int64) error
+	GetLastReviewScore(ctx context.Context, userID int64, pageID string) (int, error)
+	DeleteProgress(ctx context.Context, userID int64, pageID string) error
 }
 
 type Service struct {
@@ -558,7 +561,7 @@ func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pa
 		Notes: "",
 	}
 
-	if err := s.repo.UpdateProgress(ctx, telegramID, pageID, progress.Level, newRepCount, time.Now(), nextReview, newInterval); err != nil {
+	if err := s.repo.UpdateProgress(ctx, telegramID, pageID, progress.Level, newRepCount, time.Now(), nextReview, newInterval, true); err != nil {
 		return fmt.Errorf("update progress (telegram_id: %d, page_id: %s): %w", telegramID, pageID, err)
 	}
 
@@ -575,6 +578,10 @@ func (s *Service) GetAllUsersForReminders(ctx context.Context) ([]*models.User, 
 
 func (s *Service) GetProgress(ctx context.Context, telegramID int64, pageID string) (*models.UserProgress, error) {
 	return s.repo.GetProgress(ctx, telegramID, pageID)
+}
+
+func (s *Service) GetLastReviewScore(ctx context.Context, telegramID int64, pageID string) (int, error) {
+	return s.repo.GetLastReviewScore(ctx, telegramID, pageID)
 }
 
 func (s *Service) UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, maxPages uint) error {
@@ -705,6 +712,13 @@ func (s *Service) PrepareMaterials(ctx context.Context, telegramID int64) error 
 	return nil
 }
 
+func (s *Service) SkipPage(ctx context.Context, userID int64, pageID string) error {
+	if err := s.repo.DeleteProgress(ctx, userID, pageID); err != nil {
+		return fmt.Errorf("delete progress (telegram_id: %d, page_id: %s): %w", userID, pageID, err)
+	}
+	return nil
+}
+
 func (s *Service) RunDailyCron(ctx context.Context) error {
 	users, err := s.repo.GetAllUsersWithReminders(ctx)
 	if err != nil {
@@ -739,6 +753,10 @@ func (s *Service) RunDailyCron(ctx context.Context) error {
 		if err := s.addPagesToLearning(ctx, user.TelegramID); err != nil {
 			zap.S().Error("add pages to learning in daily cron", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
 			continue
+		}
+
+		if err := s.repo.ResetReviewedTodayFlag(ctx, user.TelegramID); err != nil {
+			zap.S().Error("reset reviewed today flag in daily cron", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
 		}
 	}
 

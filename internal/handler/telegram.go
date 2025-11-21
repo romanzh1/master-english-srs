@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,8 @@ type Service interface {
 	UpdateReviewProgress(ctx context.Context, telegramID int64, pageID string, grade int) error
 	UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, maxPages uint) error
 	GetProgress(ctx context.Context, telegramID int64, pageID string) (*models.UserProgress, error)
+	GetLastReviewScore(ctx context.Context, telegramID int64, pageID string) (int, error)
+	SkipPage(ctx context.Context, userID int64, pageID string) error
 	RunDailyCron(ctx context.Context) error
 	PrepareMaterials(ctx context.Context, telegramID int64) error
 }
@@ -421,26 +424,38 @@ func (h *TelegramHandler) handleToday(ctx context.Context, update tgbotapi.Updat
 		return
 	}
 
-	text := "📚 Сегодня на повторение:\n\n"
+	text := "📚 <b>Сегодня на повторение:</b>\n\n"
 	var buttons [][]tgbotapi.InlineKeyboardButton
+	counter := 0
 
 	for i, pwp := range duePages {
 		daysSince := int(time.Since(pwp.Progress.LastReviewDate).Hours() / 24)
-		// Экранируем название страницы для безопасной вставки в HTML
 		escapedTitle := escapeHTML(pwp.Page.Title)
-		if pwp.Progress.RepetitionCount == 0 {
-			text += fmt.Sprintf("%d. \"%s\"\n   📅 Новая страница\n   📊 Прогресс: %d повторений\n\n",
-				i+1, escapedTitle, pwp.Progress.RepetitionCount)
+
+		pageNumber := extractPageNumberFromTitle(pwp.Page.Title)
+		shouldNumber := pageNumber == 999999
+
+		var prefix string
+		var buttonText string
+		if shouldNumber {
+			counter++
+			prefix = fmt.Sprintf("%d. ", counter)
+			buttonText = fmt.Sprintf("Показать страницу %d", counter)
 		} else {
-			text += fmt.Sprintf("%d. \"%s\"\n   📅 Последнее повторение: %d дней назад\n   📊 Прогресс: %d повторений\n\n",
-				i+1, escapedTitle, daysSince, pwp.Progress.RepetitionCount)
+			prefix = ""
+			buttonText = fmt.Sprintf("Показать страницу %d", pageNumber)
+		}
+
+		if pwp.Progress.RepetitionCount == 0 {
+			text += fmt.Sprintf("%s%s\n   📅 Новая страница\n   📊 Прогресс: %d повторений\n\n",
+				prefix, escapedTitle, pwp.Progress.RepetitionCount)
+		} else {
+			text += fmt.Sprintf("%s%s\n   📅 Последнее повторение: %d дней назад\n   📊 Прогресс: %d повторений\n\n",
+				prefix, escapedTitle, daysSince, pwp.Progress.RepetitionCount)
 		}
 
 		callbackData := fmt.Sprintf("show_%d", i)
-		button := tgbotapi.NewInlineKeyboardButtonData(
-			fmt.Sprintf("Показать страницу %d", i+1),
-			callbackData,
-		)
+		button := tgbotapi.NewInlineKeyboardButtonData(buttonText, callbackData)
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardRow(button))
 	}
 
@@ -483,7 +498,8 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 		return
 	}
 
-	text := "📖 Твои страницы:\n\n"
+	text := "📖 <b>Твои страницы:</b>\n\n"
+	counter := 0
 	for _, page := range pages {
 		progress, err := h.service.GetProgress(ctx, userID, page.PageID)
 		if err != nil {
@@ -491,13 +507,85 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 			continue
 		}
 
-		// Экранируем название страницы для безопасной вставки в HTML
+		lastScore, err := h.service.GetLastReviewScore(ctx, userID, page.PageID)
+		if err != nil {
+			zap.S().Warn("get last review score", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("page_id", page.PageID))
+			lastScore = 0
+		}
+
+		var scoreEmoji string
+		if lastScore > 80 {
+			scoreEmoji = "✅"
+		} else if lastScore > 60 {
+			scoreEmoji = "🟢"
+		} else if lastScore >= 40 {
+			scoreEmoji = "🟡"
+		} else if lastScore > 0 {
+			scoreEmoji = "🔴"
+		} else {
+			scoreEmoji = ""
+		}
+
 		escapedTitle := escapeHTML(page.Title)
-		text += fmt.Sprintf("%s\n   Повторений: %d | Интервал: %d дней\n\n",
-			escapedTitle, progress.RepetitionCount, progress.IntervalDays)
+
+		pageNumber := extractPageNumberFromTitle(page.Title)
+		shouldNumber := pageNumber == 999999
+
+		var prefix string
+		if shouldNumber {
+			counter++
+			prefix = fmt.Sprintf("%d. ", counter)
+		} else {
+			prefix = ""
+		}
+
+		nextReviewStr := progress.NextReviewDate.Format("02.01.2006")
+
+		reviewedTodayStr := ""
+		if progress.ReviewedToday {
+			reviewedTodayStr = " | ✅ Повторено сегодня"
+		}
+
+		var scoreStr string
+		if lastScore > 0 {
+			if scoreEmoji != "" {
+				scoreStr = fmt.Sprintf(" | %s %d%%", scoreEmoji, lastScore)
+			} else {
+				scoreStr = fmt.Sprintf(" | %d%%", lastScore)
+			}
+		} else {
+			scoreStr = ""
+		}
+
+		text += fmt.Sprintf("%s%s\n   📅 Следующее повторение: %s\n   📊 Прогресс: %d повторений%s%s\n\n",
+			prefix, escapedTitle, nextReviewStr, progress.RepetitionCount, reviewedTodayStr, scoreStr)
 	}
 
 	h.sendMessage(chatID, text)
+}
+
+// extractPageNumberFromTitle извлекает первое число из начала заголовка страницы
+// Например, "14 Grammar Sequence of Tenses" -> 14
+// Если число не найдено, возвращает 999999 для индикации отсутствия номера
+func extractPageNumberFromTitle(title string) int {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return 0
+	}
+
+	// Ищем первое число в начале строки
+	re := regexp.MustCompile(`^\d+`)
+	match := re.FindString(title)
+	if match == "" {
+		return 999999
+	}
+
+	num, err := strconv.Atoi(match)
+	if err != nil {
+		return 999999
+	}
+
+	return num
 }
 
 func (h *TelegramHandler) handleHelp(ctx context.Context, update tgbotapi.Update) {
@@ -548,8 +636,14 @@ func (h *TelegramHandler) handleCallback(ctx context.Context, update tgbotapi.Up
 	} else if strings.HasPrefix(data, "failure_") {
 		// Legacy support - treat as forgot (<40)
 		h.handleGradeReview(ctx, callback, 30)
+	} else if data == "skip_page" {
+		h.handleSkipPage(ctx, callback)
 	} else if data == "skip_all" {
 		h.handleSkipAll(ctx, callback)
+	} else if data == "start_today_yes" {
+		h.handleStartTodayYes(ctx, callback)
+	} else if data == "start_today_no" {
+		h.handleStartTodayNo(ctx, callback)
 	} else {
 		// Неизвестный callback - отправляем уведомление пользователю
 		zap.S().Warn("unknown callback data", zap.String("data", data), zap.Int64("user_id", callback.From.ID))
@@ -703,8 +797,14 @@ func (h *TelegramHandler) handleSectionSelection(ctx context.Context, callback *
 		return
 	}
 
-	text := "✅ Секция OneNote выбрана!\n\nТеперь OneNote настроен. Используй /today для начала занятий."
-	h.sendMessage(chatID, text)
+	text := "✅ Секция OneNote выбрана!\n\nТеперь OneNote настроен.\n\nХочешь начать повторять уже сегодня?"
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Да", "start_today_yes"),
+			tgbotapi.NewInlineKeyboardButtonData("Нет", "start_today_no"),
+		),
+	)
+	h.sendMessageWithKeyboard(chatID, text, keyboard)
 }
 
 func (h *TelegramHandler) handleShowPage(ctx context.Context, callback *tgbotapi.CallbackQuery) {
@@ -764,7 +864,7 @@ func (h *TelegramHandler) handleShowPage(ctx context.Context, callback *tgbotapi
 			tgbotapi.NewInlineKeyboardButtonData("🔴 Forgot (<40%)", callbackData4),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("↩️ Пропустить", "skip_all"),
+			tgbotapi.NewInlineKeyboardButtonData("↩️ Пропустить", "skip_page"),
 		),
 	)
 
@@ -888,8 +988,73 @@ func (h *TelegramHandler) updateReviewProgress(ctx context.Context, userID int64
 	h.sendMessage(chatID, statusText)
 }
 
+func (h *TelegramHandler) handleSkipPage(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+
+	userID := callback.From.ID
+	pageID := strings.TrimPrefix(callback.Data, "skip_page_")
+
+	if err := h.service.SkipPage(ctx, userID, pageID); err != nil {
+		zap.S().Error("skip page", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("page_id", pageID))
+		h.sendMessage(callback.Message.Chat.ID, "Не удалось пропустить страницу. Попробуй позже.")
+		return
+	}
+
+	h.sendMessage(callback.Message.Chat.ID, "Хорошо, пропустим её на сегодня")
+}
+
 func (h *TelegramHandler) handleSkipAll(ctx context.Context, callback *tgbotapi.CallbackQuery) {
 	h.sendMessage(callback.Message.Chat.ID, "Хорошо, пропускаем на сегодня. Увидимся завтра! 👋")
+}
+
+func (h *TelegramHandler) handleStartTodayYes(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	userID := callback.From.ID
+	chatID := callback.Message.Chat.ID
+
+	exists, err := h.service.UserExists(ctx, userID)
+	if err != nil {
+		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	if !exists {
+		h.sendMessage(chatID, "Сначала зарегистрируйся с помощью команды /start")
+		return
+	}
+
+	user, err := h.service.GetUser(ctx, userID)
+	if err != nil {
+		zap.S().Error("get user", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	if user.AccessToken == nil || user.RefreshToken == nil {
+		h.sendMessage(chatID, "Сначала подключи OneNote с помощью команды /connect_onenote")
+		return
+	}
+
+	if user.NotebookID == nil || *user.NotebookID == "" {
+		h.sendMessage(chatID, "Сначала выбери книгу OneNote с помощью команды /select_notebook")
+		return
+	}
+
+	h.sendMessage(chatID, "Подготавливаю материалы...")
+
+	if err := h.service.PrepareMaterials(ctx, userID); err != nil {
+		if h.handleAuthError(err, userID, chatID) {
+			return
+		}
+		zap.S().Error("prepare materials", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Не удалось подготовить материалы. Попробуй позже.")
+		return
+	}
+
+	h.sendMessage(chatID, "✅ Материалы успешно подготовлены! Используй /today для начала занятий.")
+}
+
+func (h *TelegramHandler) handleStartTodayNo(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	h.sendMessage(callback.Message.Chat.ID, "Хорошо, используй /today когда будешь готов начать занятия.")
 }
 
 func (h *TelegramHandler) handleSetMaxPages(ctx context.Context, update tgbotapi.Update) {

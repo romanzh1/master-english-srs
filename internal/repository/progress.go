@@ -12,8 +12,8 @@ import (
 
 func (r Postgres) CreateProgress(ctx context.Context, progress *models.UserProgress) error {
 	query := r.psql.Insert("user_progress").
-		Columns("user_id", "page_id", "level", "repetition_count", "last_review_date", "next_review_date", "interval_days", "success_rate").
-		Values(progress.UserID, progress.PageID, progress.Level, progress.RepetitionCount, progress.LastReviewDate, progress.NextReviewDate, progress.IntervalDays, progress.SuccessRate)
+		Columns("user_id", "page_id", "level", "repetition_count", "last_review_date", "next_review_date", "interval_days", "success_rate", "reviewed_today").
+		Values(progress.UserID, progress.PageID, progress.Level, progress.RepetitionCount, progress.LastReviewDate, progress.NextReviewDate, progress.IntervalDays, progress.SuccessRate, progress.ReviewedToday)
 
 	sql, args, err := query.ToSql()
 	if err != nil {
@@ -29,7 +29,7 @@ func (r Postgres) CreateProgress(ctx context.Context, progress *models.UserProgr
 
 func (r Postgres) GetProgress(ctx context.Context, userID int64, pageID string) (*models.UserProgress, error) {
 	query := `
-		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate
+		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate, reviewed_today
 		FROM user_progress
 		WHERE user_id = $1 AND page_id = $2
 	`
@@ -43,13 +43,14 @@ func (r Postgres) GetProgress(ctx context.Context, userID int64, pageID string) 
 	return &progress, nil
 }
 
-func (r Postgres) UpdateProgress(ctx context.Context, userID int64, pageID string, level string, repetitionCount int, lastReviewDate, nextReviewDate time.Time, intervalDays int) error {
+func (r Postgres) UpdateProgress(ctx context.Context, userID int64, pageID string, level string, repetitionCount int, lastReviewDate, nextReviewDate time.Time, intervalDays int, reviewedToday bool) error {
 	query := r.psql.Update("user_progress").
 		Set("level", level).
 		Set("repetition_count", repetitionCount).
 		Set("last_review_date", lastReviewDate).
 		Set("next_review_date", nextReviewDate).
 		Set("interval_days", intervalDays).
+		Set("reviewed_today", reviewedToday).
 		Where("user_id = ? AND page_id = ?", userID, pageID)
 
 	sql, args, err := query.ToSql()
@@ -86,9 +87,9 @@ func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64) ([]*models
 	endOfDay := utils.StartOfDay(now).AddDate(0, 0, 1)
 
 	query := `
-		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate
+		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate, reviewed_today
 		FROM user_progress
-		WHERE user_id = $1 AND next_review_date <= $2
+		WHERE user_id = $1 AND next_review_date <= $2 AND reviewed_today = FALSE
 		ORDER BY next_review_date ASC
 	`
 
@@ -163,4 +164,58 @@ func (r Postgres) GetPageIDsNotInProgress(ctx context.Context, userID int64, pag
 	}
 
 	return notInProgress, nil
+}
+
+func (r Postgres) ResetReviewedTodayFlag(ctx context.Context, userID int64) error {
+	query := r.psql.Update("user_progress").
+		Set("reviewed_today", false).
+		Where("user_id = ?", userID)
+
+	sql, args, err := query.ToSql()
+	if err != nil {
+		return fmt.Errorf("build SQL query (user_id: %d): %w", userID, err)
+	}
+
+	_, err = r.ExecContext(ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("reset reviewed today flag (user_id: %d): %w", userID, err)
+	}
+
+	return nil
+}
+
+func (r Postgres) GetLastReviewScore(ctx context.Context, userID int64, pageID string) (int, error) {
+	query := `
+		SELECT score
+		FROM progress_history
+		WHERE user_id = $1 AND page_id = $2
+		ORDER BY date DESC
+		LIMIT 1
+	`
+
+	var score int
+	err := r.GetContext(ctx, &score, query, userID, pageID)
+	if err != nil {
+		// Если записи нет, возвращаем 0
+		return 0, nil
+	}
+
+	return score, nil
+}
+
+func (r Postgres) DeleteProgress(ctx context.Context, userID int64, pageID string) error {
+	query := r.psql.Delete("user_progress").
+		Where("user_id = ? AND page_id = ?", userID, pageID)
+
+	sql, args, err := query.ToSql()
+	if err != nil {
+		return fmt.Errorf("build SQL query (user_id: %d, page_id: %s): %w", userID, pageID, err)
+	}
+
+	_, err = r.ExecContext(ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("delete progress (user_id: %d, page_id: %s): %w", userID, pageID, err)
+	}
+
+	return nil
 }
