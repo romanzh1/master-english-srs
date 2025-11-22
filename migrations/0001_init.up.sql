@@ -6,15 +6,17 @@ CREATE TABLE IF NOT EXISTS users
     level                    varchar(10),
     onenote_access_token     text,
     onenote_refresh_token    text,
-    onenote_expires_at       timestamp,
+    onenote_expires_at       timestamptz,
     onenote_auth_code        text,
     onenote_notebook_id      varchar(255),
     onenote_section_id       varchar(255),
     use_manual_pages         boolean     DEFAULT FALSE,
     reminder_time            varchar(10) DEFAULT '09:00',
     max_pages_per_day        integer     DEFAULT 2,
-    created_at               timestamp   DEFAULT NOW(),
-    materials_prepared_at    timestamp NULL
+    created_at               timestamptz   DEFAULT NOW(),
+    materials_prepared_at    timestamptz NULL,
+    is_paused                boolean     DEFAULT FALSE,
+    last_activity_date       timestamptz NULL
 );
 
 CREATE TABLE IF NOT EXISTS page_references
@@ -23,8 +25,8 @@ CREATE TABLE IF NOT EXISTS page_references
     user_id     bigint       NOT NULL,
     title       text         NOT NULL,
     source      varchar(50),
-    created_at  timestamp DEFAULT NOW(),
-    updated_at  timestamp,
+    created_at  timestamptz DEFAULT NOW(),
+    updated_at  timestamptz,
     PRIMARY KEY (page_id, user_id),
     FOREIGN KEY (user_id) REFERENCES users (telegram_id)
         ON DELETE CASCADE
@@ -36,11 +38,12 @@ CREATE TABLE IF NOT EXISTS user_progress
     page_id          varchar(255) NOT NULL,
     level            varchar(10),
     repetition_count integer DEFAULT 0,
-    last_review_date timestamp,
-    next_review_date timestamp,
+    last_review_date timestamptz,
+    next_review_date timestamptz,
     interval_days    integer,
     success_rate     integer,
     reviewed_today   boolean  DEFAULT FALSE,
+    passed           boolean  DEFAULT FALSE,
     PRIMARY KEY (user_id, page_id),
     FOREIGN KEY (user_id) REFERENCES users (telegram_id)
         ON DELETE CASCADE
@@ -50,7 +53,7 @@ CREATE TABLE IF NOT EXISTS progress_history
 (
     user_id  bigint       NOT NULL,
     page_id  varchar(255) NOT NULL,
-    date     timestamp    NOT NULL,
+    date     timestamptz    NOT NULL,
     score    integer      NOT NULL,
     mode     varchar(50),
     notes    text,

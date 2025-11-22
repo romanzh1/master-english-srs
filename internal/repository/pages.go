@@ -67,3 +67,21 @@ func (r Postgres) DeleteUserPages(ctx context.Context, userID int64) error {
 	}
 	return nil
 }
+
+func (r Postgres) UpsertPageReference(ctx context.Context, page *models.PageReference) error {
+	query := `
+		INSERT INTO page_references (page_id, user_id, title, source, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (page_id, user_id) 
+		DO UPDATE SET 
+			title = EXCLUDED.title,
+			source = EXCLUDED.source,
+			updated_at = EXCLUDED.updated_at
+	`
+
+	_, err := r.ExecContext(ctx, query, page.PageID, page.UserID, page.Title, page.Source, page.CreatedAt, page.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("upsert page reference (page_id: %s, user_id: %d, title: %s): %w", page.PageID, page.UserID, page.Title, err)
+	}
+	return nil
+}

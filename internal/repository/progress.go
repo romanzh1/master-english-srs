@@ -12,8 +12,8 @@ import (
 
 func (r Postgres) CreateProgress(ctx context.Context, progress *models.UserProgress) error {
 	query := r.psql.Insert("user_progress").
-		Columns("user_id", "page_id", "level", "repetition_count", "last_review_date", "next_review_date", "interval_days", "success_rate", "reviewed_today").
-		Values(progress.UserID, progress.PageID, progress.Level, progress.RepetitionCount, progress.LastReviewDate, progress.NextReviewDate, progress.IntervalDays, progress.SuccessRate, progress.ReviewedToday)
+		Columns("user_id", "page_id", "level", "repetition_count", "last_review_date", "next_review_date", "interval_days", "success_rate", "reviewed_today", "passed").
+		Values(progress.UserID, progress.PageID, progress.Level, progress.RepetitionCount, progress.LastReviewDate, progress.NextReviewDate, progress.IntervalDays, progress.SuccessRate, progress.ReviewedToday, progress.Passed)
 
 	sql, args, err := query.ToSql()
 	if err != nil {
@@ -29,7 +29,7 @@ func (r Postgres) CreateProgress(ctx context.Context, progress *models.UserProgr
 
 func (r Postgres) GetProgress(ctx context.Context, userID int64, pageID string) (*models.UserProgress, error) {
 	query := `
-		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate, reviewed_today
+		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate, reviewed_today, passed
 		FROM user_progress
 		WHERE user_id = $1 AND page_id = $2
 	`
@@ -43,7 +43,7 @@ func (r Postgres) GetProgress(ctx context.Context, userID int64, pageID string) 
 	return &progress, nil
 }
 
-func (r Postgres) UpdateProgress(ctx context.Context, userID int64, pageID string, level string, repetitionCount int, lastReviewDate, nextReviewDate time.Time, intervalDays int, reviewedToday bool) error {
+func (r Postgres) UpdateProgress(ctx context.Context, userID int64, pageID string, level string, repetitionCount int, lastReviewDate, nextReviewDate time.Time, intervalDays int, reviewedToday bool, passed bool) error {
 	query := r.psql.Update("user_progress").
 		Set("level", level).
 		Set("repetition_count", repetitionCount).
@@ -51,6 +51,7 @@ func (r Postgres) UpdateProgress(ctx context.Context, userID int64, pageID strin
 		Set("next_review_date", nextReviewDate).
 		Set("interval_days", intervalDays).
 		Set("reviewed_today", reviewedToday).
+		Set("passed", passed).
 		Where("user_id = ? AND page_id = ?", userID, pageID)
 
 	sql, args, err := query.ToSql()
@@ -87,7 +88,7 @@ func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64) ([]*models
 	endOfDay := utils.StartOfDay(now).AddDate(0, 0, 1)
 
 	query := `
-		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate, reviewed_today
+		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate, reviewed_today, passed
 		FROM user_progress
 		WHERE user_id = $1 AND next_review_date <= $2 AND reviewed_today = FALSE
 		ORDER BY next_review_date ASC
@@ -215,6 +216,72 @@ func (r Postgres) DeleteProgress(ctx context.Context, userID int64, pageID strin
 	_, err = r.ExecContext(ctx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("delete progress (user_id: %d, page_id: %s): %w", userID, pageID, err)
+	}
+
+	return nil
+}
+
+func (r Postgres) CountPagesInProgress(ctx context.Context, userID int64) (int, error) {
+	query := r.psql.Select("COUNT(*)").
+		From("user_progress").
+		Where("user_id = ?", userID)
+
+	sql, args, err := query.ToSql()
+	if err != nil {
+		return 0, fmt.Errorf("build SQL query (user_id: %d): %w", userID, err)
+	}
+
+	var count int
+	err = r.QueryRowxContext(ctx, sql, args...).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count pages in progress (user_id: %d): %w", userID, err)
+	}
+
+	return count, nil
+}
+
+func (r Postgres) GetPagesDueInNextMonth(ctx context.Context, userID int64) ([]*models.UserProgress, error) {
+	now := utils.TruncateToMinutes(time.Now())
+	today := utils.StartOfDay(now)
+	monthFromNow := today.AddDate(0, 0, 30)
+
+	query := `
+		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate, reviewed_today, passed
+		FROM user_progress
+		WHERE user_id = $1 AND next_review_date <= $2 AND passed = FALSE
+		ORDER BY next_review_date ASC
+	`
+
+	var progressList []*models.UserProgress
+	err := r.SelectContext(ctx, &progressList, query, userID, monthFromNow)
+	if err != nil {
+		return nil, fmt.Errorf("get pages due in next month (user_id: %d): %w", userID, err)
+	}
+
+	return progressList, nil
+}
+
+func (r Postgres) ResetIntervalForPagesDueInMonth(ctx context.Context, userID int64) error {
+	now := utils.TruncateToMinutes(time.Now())
+	today := utils.StartOfDay(now)
+	monthFromNow := today.AddDate(0, 0, 30)
+	tomorrow := today.AddDate(0, 0, 1)
+
+	query := r.psql.Update("user_progress").
+		Set("interval_days", 1).
+		Set("next_review_date", tomorrow).
+		Where("user_id = ?", userID).
+		Where("next_review_date <= ?", monthFromNow).
+		Where("passed = FALSE")
+
+	sql, args, err := query.ToSql()
+	if err != nil {
+		return fmt.Errorf("build SQL query (user_id: %d): %w", userID, err)
+	}
+
+	_, err = r.ExecContext(ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("reset interval for pages due in month (user_id: %d): %w", userID, err)
 	}
 
 	return nil

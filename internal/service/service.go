@@ -17,44 +17,13 @@ import (
 	"go.uber.org/zap"
 )
 
-type Repository interface {
-	CreateUser(ctx context.Context, user *models.User) error
-	GetUser(ctx context.Context, telegramID int64) (*models.User, error)
-	UserExists(ctx context.Context, telegramID int64) (bool, error)
-	UpdateUserLevel(ctx context.Context, telegramID int64, level string) error
-	UpdateOneNoteAuth(ctx context.Context, telegramID int64, auth *models.OneNoteAuth) error
-	UpdateAuthCode(ctx context.Context, telegramID int64, authCode string) error
-	UpdateOneNoteConfig(ctx context.Context, telegramID int64, config *models.OneNoteConfig) error
-	UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, maxPages uint) error
-	GetAllUsersWithReminders(ctx context.Context) ([]*models.User, error)
-	SetMaterialsPreparedAt(ctx context.Context, telegramID int64, preparedAt time.Time) error
-	RunInTx(ctx context.Context, fn func(interface{}) error) error
-
-	CreatePageReference(ctx context.Context, page *models.PageReference) error
-	GetPageReference(ctx context.Context, pageID string, userID int64) (*models.PageReference, error)
-	GetUserPagesInProgress(ctx context.Context, userID int64) ([]*models.PageReference, error)
-	DeleteUserPages(ctx context.Context, userID int64) error
-
-	CreateProgress(ctx context.Context, progress *models.UserProgress) error
-	GetProgress(ctx context.Context, userID int64, pageID string) (*models.UserProgress, error)
-	UpdateProgress(ctx context.Context, userID int64, pageID string, level string, repetitionCount int, lastReviewDate, nextReviewDate time.Time, intervalDays int, reviewedToday bool) error
-	AddProgressHistory(ctx context.Context, userID int64, pageID string, history models.ProgressHistory) error
-	GetDuePagesToday(ctx context.Context, userID int64) ([]*models.UserProgress, error)
-	GetAllProgressPageIDs(ctx context.Context, userID int64) ([]string, error)
-	GetPageIDsNotInProgress(ctx context.Context, userID int64, pageIDs []string) ([]string, error)
-	ProgressExists(ctx context.Context, userID int64, pageID string) (bool, error)
-	ResetReviewedTodayFlag(ctx context.Context, userID int64) error
-	GetLastReviewScore(ctx context.Context, userID int64, pageID string) (int, error)
-	DeleteProgress(ctx context.Context, userID int64, pageID string) error
-}
-
 type Service struct {
-	repo          Repository
+	repo          models.Repository
 	authService   *onenote.AuthService
 	oneNoteClient *onenote.Client
 }
 
-func NewService(repo Repository, authService *onenote.AuthService, oneNoteClient *onenote.Client) *Service {
+func NewService(repo models.Repository, authService *onenote.AuthService, oneNoteClient *onenote.Client) *Service {
 	return &Service{
 		repo:          repo,
 		authService:   authService,
@@ -276,12 +245,9 @@ func (s *Service) syncPagesInternal(ctx context.Context, telegramID int64) (int,
 		return 0, err
 	}
 
-	if err := s.repo.DeleteUserPages(ctx, telegramID); err != nil {
-		return 0, fmt.Errorf("delete user pages (telegram_id: %d): %w", telegramID, err)
-	}
-
+	upsertedCount := 0
 	for _, page := range pages {
-		if strings.Contains(page.Title, "*") {
+		if strings.Contains(page.Title, "*") || !hasPageNumber(page.Title) {
 			continue
 		}
 
@@ -302,13 +268,14 @@ func (s *Service) syncPagesInternal(ctx context.Context, telegramID int64) (int,
 			UpdatedAt: updatedAt,
 		}
 
-		if err := s.repo.CreatePageReference(ctx, pageRef); err != nil {
-			zap.S().Error("create page reference", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", page.ID))
+		if err := s.repo.UpsertPageReference(ctx, pageRef); err != nil {
+			zap.S().Error("upsert page reference", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", page.ID))
 			continue
 		}
+		upsertedCount++
 	}
 
-	return len(pages), nil
+	return upsertedCount, nil
 }
 
 // withAuthRetry выполняет операцию OneNote API с автоматической обработкой ошибок авторизации
@@ -390,7 +357,7 @@ func (s *Service) GetDuePagesToday(ctx context.Context, telegramID int64) ([]*mo
 			continue
 		}
 
-		if strings.Contains(page.Title, "*") {
+		if strings.Contains(page.Title, "*") || !hasPageNumber(page.Title) {
 			continue
 		}
 
@@ -429,7 +396,7 @@ func (s *Service) GetDuePagesToday(ctx context.Context, telegramID int64) ([]*mo
 	return result, nil
 }
 
-func (s *Service) GetUserPagesInProgress(ctx context.Context, telegramID int64) ([]*models.PageReference, error) {
+func (s *Service) GetUserAllPagesInProgress(ctx context.Context, telegramID int64) ([]*models.PageReference, error) {
 	user, err := s.repo.GetUser(ctx, telegramID)
 	if err != nil {
 		return nil, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
@@ -468,7 +435,7 @@ func (s *Service) GetUserPagesInProgress(ctx context.Context, telegramID int64) 
 			continue
 		}
 
-		if strings.Contains(page.Title, "*") {
+		if strings.Contains(page.Title, "*") || !hasPageNumber(page.Title) {
 			continue
 		}
 
@@ -492,6 +459,12 @@ func (s *Service) GetUserPagesInProgress(ctx context.Context, telegramID int64) 
 			CreatedAt: time.Now(),
 			UpdatedAt: updatedAt,
 		}
+
+		if err := s.repo.UpsertPageReference(ctx, pageRef); err != nil {
+			zap.S().Error("upsert page reference", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", page.ID))
+			// Продолжаем, даже если не удалось сохранить в БД
+		}
+
 		result = append(result, pageRef)
 	}
 
@@ -502,6 +475,20 @@ func (s *Service) GetUserPagesInProgress(ctx context.Context, telegramID int64) 
 	})
 
 	return result, nil
+}
+
+// hasPageNumber проверяет, содержит ли заголовок номер страницы в начале
+// Возвращает true, если в начале title есть число
+func hasPageNumber(title string) bool {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return false
+	}
+
+	// Ищем первое число в начале строки
+	re := regexp.MustCompile(`^\d+`)
+	match := re.FindString(title)
+	return match != ""
 }
 
 // extractPageNumber извлекает первое число из начала заголовка страницы
@@ -549,10 +536,24 @@ func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pa
 		return fmt.Errorf("get progress (telegram_id: %d, page_id: %s): %w", telegramID, pageID, err)
 	}
 
+	// Проверяем, приостановлен ли пользователь, чтобы возобновить его при активности
+	user, err := s.repo.GetUser(ctx, telegramID)
+	if err != nil {
+		return fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
+	}
+
 	status := srs.ConvertGradeToStatus(grade)
 	nextReview, newInterval := srs.CalculateNextReviewDate(progress.IntervalDays, status)
 
 	newRepCount := progress.RepetitionCount + 1
+
+	// Определяем флаг passed: страница считается изученной, если она уже была на последнем интервале (180 дней)
+	// и при текущем прохождении статус = "easy" или "normal" (успешное прохождение последнего интервала)
+	passed := false
+	statusStr := string(status)
+	if progress.IntervalDays == 180 && (statusStr == "easy" || statusStr == "normal") {
+		passed = true
+	}
 
 	history := models.ProgressHistory{
 		Date:  time.Now(),
@@ -561,12 +562,24 @@ func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pa
 		Notes: "",
 	}
 
-	if err := s.repo.UpdateProgress(ctx, telegramID, pageID, progress.Level, newRepCount, time.Now(), nextReview, newInterval, true); err != nil {
+	if err := s.repo.UpdateProgress(ctx, telegramID, pageID, progress.Level, newRepCount, time.Now(), nextReview, newInterval, true, passed); err != nil {
 		return fmt.Errorf("update progress (telegram_id: %d, page_id: %s): %w", telegramID, pageID, err)
 	}
 
 	if err := s.repo.AddProgressHistory(ctx, telegramID, pageID, history); err != nil {
 		zap.S().Error("add progress history", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", pageID))
+	}
+
+	// Обновляем дату последней активности пользователя
+	if err := s.repo.UpdateUserActivity(ctx, telegramID, time.Now()); err != nil {
+		zap.S().Error("update user activity", zap.Error(err), zap.Int64("telegram_id", telegramID))
+	}
+
+	// Если пользователь был приостановлен, возобновляем его
+	if user.IsPaused != nil && *user.IsPaused {
+		if err := s.resumeUserOnActivity(ctx, telegramID); err != nil {
+			zap.S().Error("resume user on activity", zap.Error(err), zap.Int64("telegram_id", telegramID))
+		}
 	}
 
 	return nil
@@ -602,9 +615,25 @@ func (s *Service) addPagesToLearning(ctx context.Context, telegramID int64) erro
 		return fmt.Errorf("onenote not configured (telegram_id: %d)", telegramID)
 	}
 
+	// Проверяем, приостановлен ли пользователь
+	if user.IsPaused != nil && *user.IsPaused {
+		zap.S().Info("user is paused, skipping add pages to learning", zap.Int64("telegram_id", telegramID))
+		return nil
+	}
+
 	maxPagesPerDay := uint(2)
 	if user.MaxPagesPerDay != nil {
 		maxPagesPerDay = *user.MaxPagesPerDay
+	}
+
+	// Проверяем количество страниц в процессе
+	pagesInProgress, err := s.repo.CountPagesInProgress(ctx, telegramID)
+	if err != nil {
+		zap.S().Error("count pages in progress", zap.Error(err), zap.Int64("telegram_id", telegramID))
+		// Продолжаем, если ошибка подсчёта
+	} else if uint(pagesInProgress) >= maxPagesPerDay {
+		zap.S().Info("pages in progress >= max pages per day, skipping add pages", zap.Int64("telegram_id", telegramID), zap.Int("pages_in_progress", pagesInProgress), zap.Uint("max_pages_per_day", maxPagesPerDay))
+		return nil
 	}
 
 	pagesToAdd := srs.CalculatePagesToAdd(maxPagesPerDay)
@@ -626,7 +655,7 @@ func (s *Service) addPagesToLearning(ctx context.Context, telegramID int64) erro
 
 	availablePages := make([]onenote.Page, 0, len(onenotePages))
 	for _, page := range onenotePages {
-		if !strings.Contains(page.Title, "*") {
+		if !strings.Contains(page.Title, "*") && hasPageNumber(page.Title) {
 			availablePages = append(availablePages, page)
 		}
 	}
@@ -652,8 +681,7 @@ func (s *Service) addPagesToLearning(ctx context.Context, telegramID int64) erro
 	}
 
 	preparedAt := time.Now()
-	err = s.repo.RunInTx(ctx, func(txRepo interface{}) error {
-		repo := txRepo.(Repository)
+	err = s.repo.RunInTx(ctx, func(txRepo models.Repository) error {
 		for _, pageID := range notInProgress {
 			nextReview, interval := srs.GetInitialReviewDate()
 			progress := &models.UserProgress{
@@ -661,18 +689,21 @@ func (s *Service) addPagesToLearning(ctx context.Context, telegramID int64) erro
 				PageID:          pageID,
 				Level:           user.Level,
 				RepetitionCount: 0,
+				LastReviewDate:  time.Now(),
 				NextReviewDate:  nextReview,
 				IntervalDays:    interval,
 				SuccessRate:     0,
+				ReviewedToday:   false,
+				Passed:          false,
 			}
 
-			if err := repo.CreateProgress(ctx, progress); err != nil {
+			if err := txRepo.CreateProgress(ctx, progress); err != nil {
 				zap.S().Error("create progress in tx", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", pageID))
 				return fmt.Errorf("create progress in tx: %w", err)
 			}
 		}
 
-		if err := repo.SetMaterialsPreparedAt(ctx, telegramID, preparedAt); err != nil {
+		if err := txRepo.SetMaterialsPreparedAt(ctx, telegramID, preparedAt); err != nil {
 			zap.S().Error("set materials prepared at in tx", zap.Error(err), zap.Int64("telegram_id", telegramID))
 			return fmt.Errorf("set materials prepared at in tx: %w", err)
 		}
@@ -720,6 +751,8 @@ func (s *Service) SkipPage(ctx context.Context, userID int64, pageID string) err
 }
 
 func (s *Service) RunDailyCron(ctx context.Context) error {
+	zap.S().Info("running daily cron")
+
 	users, err := s.repo.GetAllUsersWithReminders(ctx)
 	if err != nil {
 		return fmt.Errorf("get all users: %w", err)
@@ -730,6 +763,12 @@ func (s *Service) RunDailyCron(ctx context.Context) error {
 
 	for _, user := range users {
 		if user.OneNoteConfig == nil {
+			continue
+		}
+
+		// Проверяем, приостановлен ли пользователь
+		if user.IsPaused != nil && *user.IsPaused {
+			zap.S().Info("skipping paused user in daily cron", zap.Int64("telegram_id", user.TelegramID))
 			continue
 		}
 
@@ -760,5 +799,75 @@ func (s *Service) RunDailyCron(ctx context.Context) error {
 		}
 	}
 
+	// Проверяем пользователей без активности неделю и приостанавливаем их
+	if err := s.checkAndPauseInactiveUsers(ctx); err != nil {
+		zap.S().Error("check and pause inactive users", zap.Error(err))
+	}
+
+	// Проверяем пользователей без активности месяц и сбрасываем интервалы
+	if err := s.checkAndResetIntervals(ctx); err != nil {
+		zap.S().Error("check and reset intervals", zap.Error(err))
+	}
+
+	return nil
+}
+
+func (s *Service) checkAndPauseInactiveUsers(ctx context.Context) error {
+	users, err := s.repo.GetUsersWithoutActivityForWeek(ctx)
+	if err != nil {
+		return fmt.Errorf("get users without activity for week: %w", err)
+	}
+
+	for _, user := range users {
+		if user.OneNoteConfig == nil {
+			continue
+		}
+
+		maxPagesPerDay := uint(2)
+		if user.MaxPagesPerDay != nil {
+			maxPagesPerDay = *user.MaxPagesPerDay
+		}
+
+		duePagesToday, err := s.repo.GetDuePagesToday(ctx, user.TelegramID)
+		if err != nil {
+			zap.S().Error("get due pages today", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
+			continue
+		}
+
+		// Приостанавливаем пользователя только если он неактивен неделю И количество страниц в today достигло максимума
+		if len(duePagesToday) >= int(maxPagesPerDay) {
+			if err := s.repo.SetUserPaused(ctx, user.TelegramID, true); err != nil {
+				zap.S().Error("set user paused", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
+				continue
+			}
+			zap.S().Info("user paused due to inactivity and max pages in today reached", zap.Int64("telegram_id", user.TelegramID), zap.Int("due_pages_today", len(duePagesToday)), zap.Uint("max_pages_per_day", maxPagesPerDay))
+		}
+	}
+
+	return nil
+}
+
+func (s *Service) checkAndResetIntervals(ctx context.Context) error {
+	users, err := s.repo.GetUsersWithoutActivityForMonth(ctx)
+	if err != nil {
+		return fmt.Errorf("get users without activity for month: %w", err)
+	}
+
+	for _, user := range users {
+		if err := s.repo.ResetIntervalForPagesDueInMonth(ctx, user.TelegramID); err != nil {
+			zap.S().Error("reset interval for pages due in month", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
+			continue
+		}
+		zap.S().Info("intervals reset for inactive user", zap.Int64("telegram_id", user.TelegramID))
+	}
+
+	return nil
+}
+
+func (s *Service) resumeUserOnActivity(ctx context.Context, userID int64) error {
+	if err := s.repo.SetUserPaused(ctx, userID, false); err != nil {
+		return fmt.Errorf("resume user on activity (telegram_id: %d): %w", userID, err)
+	}
+	zap.S().Info("user resumed due to activity", zap.Int64("telegram_id", userID))
 	return nil
 }

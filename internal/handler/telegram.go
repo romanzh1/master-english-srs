@@ -11,43 +11,16 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/romanzh1/master-english-srs/internal/models"
 	"github.com/romanzh1/master-english-srs/internal/service"
-	"github.com/romanzh1/master-english-srs/pkg/onenote"
 	"github.com/romanzh1/master-english-srs/pkg/utils"
 	"go.uber.org/zap"
 )
 
-type Service interface {
-	RegisterUser(ctx context.Context, telegramID int64, username, level string) error
-	GetUser(ctx context.Context, telegramID int64) (*models.User, error)
-	UserExists(ctx context.Context, telegramID int64) (bool, error)
-	UpdateUserLevel(ctx context.Context, telegramID int64, level string) error
-	GetAllUsersForReminders(ctx context.Context) ([]*models.User, error)
-
-	GetAuthURL(telegramID int64) string
-	ExchangeAuthCode(ctx context.Context, telegramID int64, code string) error
-
-	GetOneNoteNotebooks(ctx context.Context, telegramID int64) ([]onenote.Notebook, error)
-	GetOneNoteSections(ctx context.Context, telegramID int64, notebookID string) ([]onenote.Section, error)
-	SaveOneNoteConfig(ctx context.Context, telegramID int64, notebookID, sectionID string) error
-
-	GetDuePagesToday(ctx context.Context, telegramID int64) ([]*models.PageWithProgress, error)
-	GetUserPagesInProgress(ctx context.Context, telegramID int64) ([]*models.PageReference, error)
-	GetPageContent(ctx context.Context, telegramID int64, pageID string) (string, error)
-	UpdateReviewProgress(ctx context.Context, telegramID int64, pageID string, grade int) error
-	UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, maxPages uint) error
-	GetProgress(ctx context.Context, telegramID int64, pageID string) (*models.UserProgress, error)
-	GetLastReviewScore(ctx context.Context, telegramID int64, pageID string) (int, error)
-	SkipPage(ctx context.Context, userID int64, pageID string) error
-	RunDailyCron(ctx context.Context) error
-	PrepareMaterials(ctx context.Context, telegramID int64) error
-}
-
 type TelegramHandler struct {
 	api     *tgbotapi.BotAPI
-	service Service
+	service models.Service
 }
 
-func NewTelegramHandler(token string, service Service) (*TelegramHandler, error) {
+func NewTelegramHandler(token string, service models.Service) (*TelegramHandler, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("create bot API: %w", err)
@@ -483,7 +456,7 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 		return
 	}
 
-	pages, err := h.service.GetUserPagesInProgress(ctx, userID)
+	pages, err := h.service.GetUserAllPagesInProgress(ctx, userID)
 	if err != nil {
 		if h.handleAuthError(err, userID, chatID) {
 			return
@@ -954,16 +927,6 @@ func (h *TelegramHandler) handleGradeReview(ctx context.Context, callback *tgbot
 	h.updateReviewProgress(ctx, userID, chatID, pageID, grade)
 }
 
-func (h *TelegramHandler) handleReviewSuccess(ctx context.Context, callback *tgbotapi.CallbackQuery) {
-	// Legacy support
-	h.handleGradeReview(ctx, callback, 90)
-}
-
-func (h *TelegramHandler) handleReviewFailure(ctx context.Context, callback *tgbotapi.CallbackQuery) {
-	// Legacy support
-	h.handleGradeReview(ctx, callback, 30)
-}
-
 func (h *TelegramHandler) updateReviewProgress(ctx context.Context, userID int64, chatID int64, pageID string, grade int) {
 	if err := h.service.UpdateReviewProgress(ctx, userID, pageID, grade); err != nil {
 		zap.S().Error("update review progress", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("page_id", pageID), zap.Int("grade", grade))
@@ -1186,6 +1149,10 @@ func (h *TelegramHandler) startDailyCron() {
 		zone = time.UTC
 	}
 
+	if err := h.service.RunDailyCron(context.Background()); err != nil {
+		zap.S().Error("run daily cron", zap.Error(err))
+	}
+
 	getNextMidnight := func() time.Time {
 		now := utils.TruncateToMinutes(time.Now().In(zone))
 		today := utils.StartOfDay(now)
@@ -1194,7 +1161,8 @@ func (h *TelegramHandler) startDailyCron() {
 	}
 
 	nextRun := getNextMidnight()
-	timer := time.NewTimer(time.Until(nextRun))
+	nowInZone := time.Now().In(zone)
+	timer := time.NewTimer(nextRun.Sub(nowInZone))
 
 	var lastRunDate time.Time
 
@@ -1216,7 +1184,9 @@ func (h *TelegramHandler) startDailyCron() {
 		}
 
 		nextRun = getNextMidnight()
-		timer.Reset(time.Until(nextRun))
+		// Исправление: используем московское время для расчета времени до следующего запуска
+		nowInZone = time.Now().In(zone)
+		timer.Reset(nextRun.Sub(nowInZone))
 	}
 }
 

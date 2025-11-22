@@ -20,6 +20,8 @@ type User struct {
 	SectionID           *string    `db:"onenote_section_id"`
 	MaxPagesPerDay      *uint      `db:"max_pages_per_day"`
 	MaterialsPreparedAt *time.Time `db:"materials_prepared_at"`
+	IsPaused            *bool      `db:"is_paused"`
+	LastActivityDate    *time.Time `db:"last_activity_date"`
 }
 
 type OneNoteAuth struct {
@@ -52,6 +54,7 @@ type UserProgress struct {
 	IntervalDays    int       `db:"interval_days"`
 	SuccessRate     int       `db:"success_rate"`
 	ReviewedToday   bool      `db:"reviewed_today"`
+	Passed          bool      `db:"passed"`
 }
 
 type ProgressHistory struct {

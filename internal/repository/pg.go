@@ -10,6 +10,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
 	"github.com/pressly/goose/v3"
+	"github.com/romanzh1/master-english-srs/internal/models"
 )
 
 type Postgres struct {
@@ -87,7 +88,7 @@ func (r *Postgres) Rollback() error {
 	return r.tx.Rollback()
 }
 
-func (r *Postgres) RunInTx(ctx context.Context, fn func(interface{}) error) error {
+func (r *Postgres) RunInTx(ctx context.Context, fn func(models.Repository) error) error {
 	txRepo, err := r.Begin()
 	if err != nil {
 		return err
