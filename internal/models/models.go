@@ -19,9 +19,9 @@ type User struct {
 	NotebookID          *string    `db:"onenote_notebook_id"`
 	SectionID           *string    `db:"onenote_section_id"`
 	MaxPagesPerDay      *uint      `db:"max_pages_per_day"`
-	MaterialsPreparedAt *time.Time `db:"materials_prepared_at"`
 	IsPaused            *bool      `db:"is_paused"`
 	LastActivityDate    *time.Time `db:"last_activity_date"`
+	Timezone            *string    `db:"timezone"`
 }
 
 type OneNoteAuth struct {

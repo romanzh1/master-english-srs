@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/romanzh1/master-english-srs/internal/models"
+	"github.com/romanzh1/master-english-srs/pkg/utils"
 )
 
 func (r Postgres) CreateUser(ctx context.Context, user *models.User) error {
@@ -34,8 +35,8 @@ func (r Postgres) GetUser(ctx context.Context, telegramID int64) (*models.User, 
 	query := `
 		SELECT telegram_id, username, level, onenote_access_token, onenote_refresh_token, 
 		       onenote_expires_at, onenote_auth_code, onenote_notebook_id, onenote_section_id, 
-		       use_manual_pages, reminder_time, max_pages_per_day, materials_prepared_at, created_at,
-		       is_paused, last_activity_date
+		       use_manual_pages, reminder_time, max_pages_per_day, created_at,
+		       is_paused, last_activity_date, timezone
 		FROM users WHERE telegram_id = $1
 	`
 
@@ -154,8 +155,8 @@ func (r Postgres) GetAllUsersWithReminders(ctx context.Context) ([]*models.User,
 	query := `
 		SELECT telegram_id, username, level, onenote_access_token, onenote_refresh_token, 
 		       onenote_expires_at, onenote_auth_code, onenote_notebook_id, onenote_section_id, 
-		       use_manual_pages, reminder_time, max_pages_per_day, materials_prepared_at, created_at,
-		       is_paused, last_activity_date
+		       use_manual_pages, reminder_time, max_pages_per_day, created_at,
+		       is_paused, last_activity_date, timezone
 		FROM users
 	`
 
@@ -205,19 +206,19 @@ func (r Postgres) UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, ma
 	return nil
 }
 
-func (r Postgres) SetMaterialsPreparedAt(ctx context.Context, telegramID int64, preparedAt time.Time) error {
+func (r Postgres) UpdateUserTimezone(ctx context.Context, telegramID int64, timezone string) error {
 	query := r.psql.Update("users").
-		Set("materials_prepared_at", preparedAt).
+		Set("timezone", timezone).
 		Where("telegram_id = ?", telegramID)
 
 	sql, args, err := query.ToSql()
 	if err != nil {
-		return fmt.Errorf("build SQL query (telegram_id: %d, prepared_at: %v): %w", telegramID, preparedAt, err)
+		return fmt.Errorf("build SQL query (telegram_id: %d, timezone: %s): %w", telegramID, timezone, err)
 	}
 
 	_, err = r.ExecContext(ctx, sql, args...)
 	if err != nil {
-		return fmt.Errorf("set materials prepared at (telegram_id: %d, prepared_at: %v): %w", telegramID, preparedAt, err)
+		return fmt.Errorf("update user timezone (telegram_id: %d, timezone: %s): %w", telegramID, timezone, err)
 	}
 	return nil
 }
@@ -257,14 +258,14 @@ func (r Postgres) SetUserPaused(ctx context.Context, userID int64, paused bool) 
 }
 
 func (r Postgres) GetUsersWithoutActivityForWeek(ctx context.Context) ([]*models.User, error) {
-	now := time.Now()
+	now := utils.NowUTC()
 	weekAgo := now.AddDate(0, 0, -7)
 
 	query := `
 		SELECT telegram_id, username, level, onenote_access_token, onenote_refresh_token, 
 		       onenote_expires_at, onenote_auth_code, onenote_notebook_id, onenote_section_id, 
-		       use_manual_pages, reminder_time, max_pages_per_day, materials_prepared_at, created_at,
-		       is_paused, last_activity_date
+		       use_manual_pages, reminder_time, max_pages_per_day, created_at,
+		       is_paused, last_activity_date, timezone
 		FROM users
 		WHERE (last_activity_date IS NULL OR last_activity_date < $1) AND is_paused = FALSE
 	`
@@ -299,14 +300,14 @@ func (r Postgres) GetUsersWithoutActivityForWeek(ctx context.Context) ([]*models
 }
 
 func (r Postgres) GetUsersWithoutActivityForMonth(ctx context.Context) ([]*models.User, error) {
-	now := time.Now()
+	now := utils.NowUTC()
 	monthAgo := now.AddDate(0, 0, -30)
 
 	query := `
 		SELECT telegram_id, username, level, onenote_access_token, onenote_refresh_token, 
 		       onenote_expires_at, onenote_auth_code, onenote_notebook_id, onenote_section_id, 
-		       use_manual_pages, reminder_time, max_pages_per_day, materials_prepared_at, created_at,
-		       is_paused, last_activity_date
+		       use_manual_pages, reminder_time, max_pages_per_day, created_at,
+		       is_paused, last_activity_date, timezone
 		FROM users
 		WHERE (last_activity_date IS NULL OR last_activity_date < $1)
 	`

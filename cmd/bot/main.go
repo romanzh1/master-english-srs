@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/romanzh1/master-english-srs/internal/handler"
@@ -15,21 +14,9 @@ import (
 )
 
 func main() {
-	// Загружаем московскую временную зону
-	moscowLocation, err := time.LoadLocation("Europe/Moscow")
-	if err != nil {
-		moscowLocation = time.UTC
-		zap.S().Warn("failed to load Moscow location, using UTC", zap.Error(err))
-	}
-
 	config := zap.NewDevelopmentConfig()
 	config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	config.EncoderConfig.TimeKey = "timestamp"
-	// Исправление: используем кастомный encoder с московским временем
-	config.EncoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
-		moscowTime := t.In(moscowLocation)
-		enc.AppendString(moscowTime.Format("2006-01-02T15:04:05-07:00"))
-	}
 
 	logger, err := config.Build()
 	if err != nil {

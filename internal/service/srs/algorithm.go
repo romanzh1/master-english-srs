@@ -52,27 +52,33 @@ func CalculateNextReviewDate(currentIntervalDays int, success Grade) (time.Time,
 }
 
 func calculateInterval(interval int) (time.Time, int) {
-	moscow, err := time.LoadLocation("Europe/Moscow")
-	if err != nil {
-		moscow = time.UTC
-	}
-
-	now := time.Now().In(moscow)
+	now := utils.NowUTC()
 	t := now.AddDate(0, 0, interval)
 
 	return utils.StartOfDay(t), interval
 }
 
+// GetInitialReviewDate returns today's date with interval 0 (reading mode)
 func GetInitialReviewDate() (time.Time, int) {
-	moscow, err := time.LoadLocation("Europe/Moscow")
-	if err != nil {
-		moscow = time.UTC
-	}
+	now := utils.NowUTC()
 
-	now := time.Now().In(moscow)
+	return utils.StartOfDay(now), 0
+}
+
+// GetNextDayReviewDate returns tomorrow's date with interval 1 (transition to AI mode)
+func GetNextDayReviewDate() (time.Time, int) {
+	now := utils.NowUTC()
 	tomorrow := now.AddDate(0, 0, 1)
 
 	return utils.StartOfDay(tomorrow), 1
+}
+
+// GetNextDayReadingMode returns tomorrow's date with interval 0 (stay in reading mode)
+func GetNextDayReadingMode() (time.Time, int) {
+	now := utils.NowUTC()
+	tomorrow := now.AddDate(0, 0, 1)
+
+	return utils.StartOfDay(tomorrow), 0
 }
 
 // CalculatePagesToAdd determines how many pages to add to learning based on max pages per day

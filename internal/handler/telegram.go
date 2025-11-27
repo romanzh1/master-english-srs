@@ -52,6 +52,8 @@ func (h *TelegramHandler) handleCommand(ctx context.Context, update tgbotapi.Upd
 		h.handleGetMaxPages(ctx, update)
 	case "prepare_materials":
 		h.handlePrepareMaterials(ctx, update)
+	case "set_timezone":
+		h.handleSetTimezone(ctx, update)
 	case "help":
 		h.handleHelp(ctx, update)
 	default:
@@ -124,9 +126,9 @@ func (h *TelegramHandler) handleStart(ctx context.Context, update tgbotapi.Updat
 
 	text := `Привет! 👋
 
-Я помогу тебе изучать английский по системе интервальных повторений (SRS).
+		Я помогу тебе изучать английский по системе интервальных повторений (SRS).
 
-Выбери свой уровень:`
+		Выбери свой уровень:`
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -401,8 +403,9 @@ func (h *TelegramHandler) handleToday(ctx context.Context, update tgbotapi.Updat
 	var buttons [][]tgbotapi.InlineKeyboardButton
 	counter := 0
 
+	nowUTC := utils.NowUTC()
 	for i, pwp := range duePages {
-		daysSince := int(time.Since(pwp.Progress.LastReviewDate).Hours() / 24)
+		daysSince := int(nowUTC.Sub(pwp.Progress.LastReviewDate).Hours() / 24)
 		escapedTitle := escapeHTML(pwp.Page.Title)
 
 		pageNumber := extractPageNumberFromTitle(pwp.Page.Title)
@@ -454,6 +457,18 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 	if !exists {
 		h.sendMessage(chatID, "Сначала зарегистрируйся с помощью команды /start")
 		return
+	}
+
+	user, err := h.service.GetUser(ctx, userID)
+	if err != nil {
+		zap.S().Error("get user", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	timezone := "UTC"
+	if user.Timezone != nil && *user.Timezone != "" {
+		timezone = *user.Timezone
 	}
 
 	pages, err := h.service.GetUserAllPagesInProgress(ctx, userID)
@@ -512,7 +527,13 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 			prefix = ""
 		}
 
-		nextReviewStr := progress.NextReviewDate.Format("02.01.2006")
+		// Convert NextReviewDate to user's timezone for display
+		nextReviewInTz, err := utils.ToUserTimezone(progress.NextReviewDate, timezone)
+		if err != nil {
+			zap.S().Warn("failed to convert next review date to user timezone", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("timezone", timezone))
+			nextReviewInTz = progress.NextReviewDate
+		}
+		nextReviewStr := nextReviewInTz.Format("02.01.2006")
 
 		reviewedTodayStr := ""
 		if progress.ReviewedToday {
@@ -576,6 +597,7 @@ func (h *TelegramHandler) handleHelp(ctx context.Context, update tgbotapi.Update
 		/set_max_pages - Установить максимальное количество страниц в день на повторение
 		/get_max_pages - Показать текущее максимальное количество страниц в день для повторения
 		/prepare_materials - Подгрузить дополнительную страницу на сегодня
+		/set_timezone - Установить таймзону (например, /set_timezone Europe/Moscow)
 
 		/help - Справка`
 
@@ -617,6 +639,10 @@ func (h *TelegramHandler) handleCallback(ctx context.Context, update tgbotapi.Up
 		h.handleStartTodayYes(ctx, callback)
 	} else if data == "start_today_no" {
 		h.handleStartTodayNo(ctx, callback)
+	} else if strings.HasPrefix(data, "timezone_") {
+		h.handleTimezoneSelection(ctx, callback)
+	} else if strings.HasPrefix(data, "max_pages_") {
+		h.handleMaxPagesSelection(ctx, callback)
 	} else {
 		// Неизвестный callback - отправляем уведомление пользователю
 		zap.S().Warn("unknown callback data", zap.String("data", data), zap.Int64("user_id", callback.From.ID))
@@ -650,8 +676,10 @@ func (h *TelegramHandler) handleLevelSelection(ctx context.Context, callback *tg
 			h.sendMessage(chatID, "Произошла ошибка при регистрации. Попробуй позже.")
 			return
 		}
-		text := fmt.Sprintf("✅ Регистрация завершена! Уровень установлен: %s\n\nТеперь подключи OneNote с помощью /connect_onenote", level)
+		text := fmt.Sprintf("✅ Регистрация завершена! Уровень установлен: %s\n\nВыбери максимальное количество страниц в день для повторения:", level)
 		h.sendMessage(chatID, text)
+		// Показываем выбор max_pages после регистрации
+		h.showMaxPagesSelector(chatID)
 	} else {
 		// Обновляем уровень существующего пользователя
 		if err := h.service.UpdateUserLevel(ctx, userID, level); err != nil {
@@ -818,8 +846,15 @@ func (h *TelegramHandler) handleShowPage(ctx context.Context, callback *tgbotapi
 	// Экранируем содержимое страницы для безопасной вставки в HTML
 	escapedContent := escapeHTML(content)
 	text := fmt.Sprintf("📄 <b>Страница</b>\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n%s\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n", escapedContent)
-	text += "💡 Скопируй эту страницу и отправь в бота Poe для генерации задания.\n\n"
-	text += "После прохождения задания отметь результат:"
+
+	// Проверяем режим: чтение (IntervalDays == 0) или AI (IntervalDays >= 1)
+	isReadingMode := duePages[index].Progress.IntervalDays == 0
+	if isReadingMode {
+		text += "📖 Прочитай слова и оцени насколько хорошо их помнишь:"
+	} else {
+		text += "💡 Скопируй эту страницу и отправь в бота Poe для генерации задания.\n\n"
+		text += "После прохождения задания отметь результат:"
+	}
 
 	// Передаём индекс страницы в кнопки оценки
 	callbackData1 := fmt.Sprintf("grade_80_100_%d", index)
@@ -1020,6 +1055,68 @@ func (h *TelegramHandler) handleStartTodayNo(ctx context.Context, callback *tgbo
 	h.sendMessage(callback.Message.Chat.ID, "Хорошо, используй /today когда будешь готов начать занятия.")
 }
 
+func (h *TelegramHandler) handleMaxPagesSelection(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	userID := callback.From.ID
+	maxPagesStr := strings.TrimPrefix(callback.Data, "max_pages_")
+	chatID := callback.Message.Chat.ID
+
+	maxPagesInt, err := strconv.Atoi(maxPagesStr)
+	if err != nil || maxPagesInt < 2 || maxPagesInt > 4 {
+		zap.S().Error("invalid max pages value", zap.String("max_pages", maxPagesStr), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "❌ Некорректное значение. Попробуй ещё раз.")
+		return
+	}
+
+	maxPages := uint(maxPagesInt)
+	if err := h.service.UpdateMaxPagesPerDay(ctx, userID, maxPages); err != nil {
+		zap.S().Error("update max pages per day", zap.Error(err), zap.Int64("telegram_id", userID), zap.Uint("max_pages", maxPages))
+		h.sendMessage(chatID, "Ошибка при обновлении настроек. Попробуй позже.")
+		return
+	}
+
+	text := fmt.Sprintf("✅ Максимальное количество страниц в день установлено: %d\n\nТеперь выбери свой город для установки таймзоны:", maxPages)
+	h.sendMessage(chatID, text)
+	// Показываем выбор таймзоны после установки max_pages
+	h.showTimezoneSelector(chatID)
+}
+
+func (h *TelegramHandler) handleTimezoneSelection(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	userID := callback.From.ID
+	timezoneStr := strings.TrimPrefix(callback.Data, "timezone_")
+	chatID := callback.Message.Chat.ID
+
+	// Validate timezone by trying to load it
+	_, err := time.LoadLocation(timezoneStr)
+	if err != nil {
+		zap.S().Error("invalid timezone", zap.Error(err), zap.String("timezone", timezoneStr), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, fmt.Sprintf("❌ Некорректная таймзона: %s", timezoneStr))
+		return
+	}
+
+	if err := h.service.UpdateUserTimezone(ctx, userID, timezoneStr); err != nil {
+		zap.S().Error("update user timezone", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("timezone", timezoneStr))
+		h.sendMessage(chatID, "Ошибка при обновлении таймзоны. Попробуй позже.")
+		return
+	}
+
+	// Получаем информацию о пользователе, чтобы понять, был ли это этап регистрации
+	user, err := h.service.GetUser(ctx, userID)
+	isNewUser := false
+	if err == nil && user != nil {
+		// Проверяем, есть ли у пользователя настройки OneNote
+		// Если нет, значит это этап регистрации
+		if user.NotebookID == nil || *user.NotebookID == "" {
+			isNewUser = true
+		}
+	}
+
+	if isNewUser {
+		h.sendMessage(chatID, fmt.Sprintf("✅ Таймзона установлена: %s\n\nТеперь подключи OneNote с помощью /connect_onenote", timezoneStr))
+	} else {
+		h.sendMessage(chatID, fmt.Sprintf("✅ Таймзона установлена: %s\n\nНовые материалы будут добавляться автоматически в 00:00 каждый день по твоему местному времени.", timezoneStr))
+	}
+}
+
 func (h *TelegramHandler) handleSetMaxPages(ctx context.Context, update tgbotapi.Update) {
 	userID := update.Message.From.ID
 	chatID := update.Message.Chat.ID
@@ -1142,51 +1239,130 @@ func (h *TelegramHandler) handlePrepareMaterials(ctx context.Context, update tgb
 	h.sendMessage(chatID, "✅ Материалы успешно подготовлены!")
 }
 
-func (h *TelegramHandler) startDailyCron() {
-	zone, err := time.LoadLocation("Europe/Moscow")
-	if err != nil {
-		zap.S().Error("load moscow location", zap.Error(err))
-		zone = time.UTC
+// showMaxPagesSelector показывает кнопки для выбора максимального количества страниц в день
+func (h *TelegramHandler) showMaxPagesSelector(chatID int64) {
+	text := "📊 Выбери максимальное количество страниц в день:\n\n2 страницы в день → добавляется 1 страница\n3 страницы в день → добавляется 1 (60%) или 2 (40%)\n4 страницы в день → добавляется 2 страницы"
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("2", "max_pages_2"),
+			tgbotapi.NewInlineKeyboardButtonData("3", "max_pages_3"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("4", "max_pages_4"),
+		),
+	)
+
+	h.sendMessageWithKeyboard(chatID, text, keyboard)
+}
+
+// showTimezoneSelector показывает кнопки с популярными городами для выбора таймзоны
+func (h *TelegramHandler) showTimezoneSelector(chatID int64) {
+	text := "🌍 Выбери свой город для установки таймзоны:"
+
+	// Популярные города с их таймзонами
+	cities := []struct {
+		name     string
+		timezone string
+		offset   int // Смещение относительно UTC в часах
+	}{
+		{"Москва", "Europe/Moscow", 3},
+		{"Санкт-Петербург", "Europe/Moscow", 3},
+		{"Киев", "Europe/Kyiv", 2},
+		{"Минск", "Europe/Minsk", 3},
+		{"Лондон", "Europe/London", 0},
+		{"Париж", "Europe/Paris", 1},
+		{"Берлин", "Europe/Berlin", 1},
+		{"Рим", "Europe/Rome", 1},
+		{"Нью-Йорк", "America/New_York", -5},
+		{"Лос-Анджелес", "America/Los_Angeles", -8},
+		{"Чикаго", "America/Chicago", -6},
+		{"Торонто", "America/Toronto", -5},
+		{"Токио", "Asia/Tokyo", 9},
+		{"Пекин", "Asia/Shanghai", 8},
+		{"Дубай", "Asia/Dubai", 4},
+		{"Тегеран", "Asia/Tehran", 3},
+		{"Дели", "Asia/Kolkata", 5},
+		{"Сидней", "Australia/Sydney", 10},
+		{"Сан-Паулу", "America/Sao_Paulo", -3},
+		{"Буэнос-Айрес", "America/Argentina/Buenos_Aires", -3},
+		{"Каир", "Africa/Cairo", 2},
 	}
 
-	if err := h.service.RunDailyCron(context.Background()); err != nil {
-		zap.S().Error("run daily cron", zap.Error(err))
-	}
+	var buttons [][]tgbotapi.InlineKeyboardButton
 
-	getNextMidnight := func() time.Time {
-		now := utils.TruncateToMinutes(time.Now().In(zone))
-		today := utils.StartOfDay(now)
+	// Группируем города по 2 в ряд
+	for i := 0; i < len(cities); i += 2 {
+		var row []tgbotapi.InlineKeyboardButton
 
-		return today.AddDate(0, 0, 1)
-	}
+		// Первая кнопка в ряду
+		offsetStr := formatTimezoneOffset(cities[i].offset)
+		buttonText := fmt.Sprintf("%s %s", cities[i].name, offsetStr)
+		callbackData := fmt.Sprintf("timezone_%s", cities[i].timezone)
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(buttonText, callbackData))
 
-	nextRun := getNextMidnight()
-	nowInZone := time.Now().In(zone)
-	timer := time.NewTimer(nextRun.Sub(nowInZone))
-
-	var lastRunDate time.Time
-
-	for {
-		<-timer.C
-
-		now := utils.TruncateToMinutes(time.Now().In(zone)) //TODO rewrite zone to method
-		currentDate := utils.StartOfDay(now)
-
-		if now.Hour() == 0 && now.Minute() == 0 && !utils.DatesEqual(lastRunDate, currentDate) {
-			ctx := context.Background()
-
-			if err := h.service.RunDailyCron(ctx); err != nil {
-				zap.S().Error("run daily cron", zap.Error(err))
-			} else {
-				lastRunDate = currentDate
-				zap.S().Info("daily cron completed successfully")
-			}
+		// Вторая кнопка в ряду (если есть)
+		if i+1 < len(cities) {
+			offsetStr2 := formatTimezoneOffset(cities[i+1].offset)
+			buttonText2 := fmt.Sprintf("%s %s", cities[i+1].name, offsetStr2)
+			callbackData2 := fmt.Sprintf("timezone_%s", cities[i+1].timezone)
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(buttonText2, callbackData2))
 		}
 
-		nextRun = getNextMidnight()
-		// Исправление: используем московское время для расчета времени до следующего запуска
-		nowInZone = time.Now().In(zone)
-		timer.Reset(nextRun.Sub(nowInZone))
+		buttons = append(buttons, row)
+	}
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	h.sendMessageWithKeyboard(chatID, text, keyboard)
+}
+
+// formatTimezoneOffset форматирует смещение таймзоны в строку типа "UTC+3" или "UTC-5"
+func formatTimezoneOffset(offset int) string {
+	if offset == 0 {
+		return "UTC"
+	}
+	if offset > 0 {
+		return fmt.Sprintf("UTC+%d", offset)
+	}
+	return fmt.Sprintf("UTC%d", offset) // Для отрицательных значений fmt.Sprintf автоматически добавит минус
+}
+
+func (h *TelegramHandler) handleSetTimezone(ctx context.Context, update tgbotapi.Update) {
+	userID := update.Message.From.ID
+	chatID := update.Message.Chat.ID
+
+	exists, err := h.service.UserExists(ctx, userID)
+	if err != nil {
+		zap.S().Error("check user exists", zap.Error(err), zap.Int64("telegram_id", userID))
+		h.sendMessage(chatID, "Произошла ошибка. Попробуй позже.")
+		return
+	}
+
+	if !exists {
+		h.sendMessage(chatID, "Сначала зарегистрируйся с помощью команды /start")
+		return
+	}
+
+	// Показываем кнопки для выбора таймзоны
+	h.showTimezoneSelector(chatID)
+}
+
+func (h *TelegramHandler) startDailyCron() {
+	// Run immediately on startup
+	// ctx := context.Background()
+	// if err := h.service.RunDailyCron(ctx); err != nil {
+	// 	zap.S().Error("run daily cron on startup", zap.Error(err))
+	// }
+
+	// Run every hour to check if it's midnight in any user's timezone
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		ctx := context.Background()
+		if err := h.service.RunDailyCron(ctx); err != nil {
+			zap.S().Error("run daily cron", zap.Error(err))
+		}
 	}
 }
 
@@ -1244,9 +1420,20 @@ func (h *TelegramHandler) checkAndSendReminders() {
 			continue
 		}
 
-		now := utils.GetMoscowTime()
+		// Get current time in user's timezone
+		timezone := "UTC"
+		if user.Timezone != nil && *user.Timezone != "" {
+			timezone = *user.Timezone
+		}
 
-		if reminder.Hour() != now.Hour() && reminder.Minute() != now.Minute() {
+		nowUTC := utils.NowUTC()
+		now, err := utils.ToUserTimezone(nowUTC, timezone)
+		if err != nil {
+			zap.S().Warn("failed to convert to user timezone", zap.Error(err), zap.Int64("telegram_id", user.TelegramID), zap.String("timezone", timezone))
+			continue
+		}
+
+		if reminder.Hour() != now.Hour() || reminder.Minute() != now.Minute() {
 			continue
 		}
 

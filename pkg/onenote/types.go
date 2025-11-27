@@ -19,7 +19,8 @@ type Section struct {
 }
 
 type PagesResponse struct {
-	Value []Page `json:"value"`
+	Value    []Page `json:"value"`
+	NextLink string `json:"@odata.nextLink"`
 }
 
 type Page struct {

@@ -16,8 +16,8 @@ type Repository interface {
 	UpdateAuthCode(ctx context.Context, telegramID int64, authCode string) error
 	UpdateOneNoteConfig(ctx context.Context, telegramID int64, config *OneNoteConfig) error
 	UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, maxPages uint) error
+	UpdateUserTimezone(ctx context.Context, telegramID int64, timezone string) error
 	GetAllUsersWithReminders(ctx context.Context) ([]*User, error)
-	SetMaterialsPreparedAt(ctx context.Context, telegramID int64, preparedAt time.Time) error
 	RunInTx(ctx context.Context, fn func(Repository) error) error
 
 	CreatePageReference(ctx context.Context, page *PageReference) error
@@ -30,7 +30,7 @@ type Repository interface {
 	GetProgress(ctx context.Context, userID int64, pageID string) (*UserProgress, error)
 	UpdateProgress(ctx context.Context, userID int64, pageID string, level string, repetitionCount int, lastReviewDate, nextReviewDate time.Time, intervalDays int, reviewedToday bool, passed bool) error
 	AddProgressHistory(ctx context.Context, userID int64, pageID string, history ProgressHistory) error
-	GetDuePagesToday(ctx context.Context, userID int64) ([]*UserProgress, error)
+	GetDuePagesToday(ctx context.Context, userID int64, timezone string) ([]*UserProgress, error)
 	GetAllProgressPageIDs(ctx context.Context, userID int64) ([]string, error)
 	GetPageIDsNotInProgress(ctx context.Context, userID int64, pageIDs []string) ([]string, error)
 	ProgressExists(ctx context.Context, userID int64, pageID string) (bool, error)
@@ -67,6 +67,7 @@ type Service interface {
 	GetPageContent(ctx context.Context, telegramID int64, pageID string) (string, error)
 	UpdateReviewProgress(ctx context.Context, telegramID int64, pageID string, grade int) error
 	UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, maxPages uint) error
+	UpdateUserTimezone(ctx context.Context, telegramID int64, timezone string) error
 	GetProgress(ctx context.Context, telegramID int64, pageID string) (*UserProgress, error)
 	GetLastReviewScore(ctx context.Context, telegramID int64, pageID string) (int, error)
 	SkipPage(ctx context.Context, userID int64, pageID string) error

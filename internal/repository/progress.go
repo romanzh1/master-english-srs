@@ -83,9 +83,24 @@ func (r Postgres) AddProgressHistory(ctx context.Context, userID int64, pageID s
 	return nil
 }
 
-func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64) ([]*models.UserProgress, error) {
-	now := utils.TruncateToMinutes(time.Now())
-	endOfDay := utils.StartOfDay(now).AddDate(0, 0, 1)
+func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64, timezone string) ([]*models.UserProgress, error) {
+	nowUTC := utils.TruncateToMinutes(utils.NowUTC())
+
+	// Convert to user's timezone to determine "today"
+	var endOfDay time.Time
+	if timezone != "" {
+		startOfDayInTz, err := utils.StartOfDayInTimezone(nowUTC, timezone)
+		if err != nil {
+			return nil, fmt.Errorf("get start of day in timezone (user_id: %d, timezone: %s): %w", userID, timezone, err)
+		}
+		// End of day in user's timezone, then convert back to UTC for database comparison
+		endOfDayInTz := startOfDayInTz.AddDate(0, 0, 1)
+		// Convert back to UTC for database query (all times in DB are UTC)
+		endOfDay = endOfDayInTz.UTC()
+	} else {
+		// Fallback to UTC if no timezone specified
+		endOfDay = utils.StartOfDay(nowUTC).AddDate(0, 0, 1)
+	}
 
 	query := `
 		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate, reviewed_today, passed
@@ -241,7 +256,7 @@ func (r Postgres) CountPagesInProgress(ctx context.Context, userID int64) (int, 
 }
 
 func (r Postgres) GetPagesDueInNextMonth(ctx context.Context, userID int64) ([]*models.UserProgress, error) {
-	now := utils.TruncateToMinutes(time.Now())
+	now := utils.TruncateToMinutes(utils.NowUTC())
 	today := utils.StartOfDay(now)
 	monthFromNow := today.AddDate(0, 0, 30)
 
@@ -262,7 +277,7 @@ func (r Postgres) GetPagesDueInNextMonth(ctx context.Context, userID int64) ([]*
 }
 
 func (r Postgres) ResetIntervalForPagesDueInMonth(ctx context.Context, userID int64) error {
-	now := utils.TruncateToMinutes(time.Now())
+	now := utils.TruncateToMinutes(utils.NowUTC())
 	today := utils.StartOfDay(now)
 	monthFromNow := today.AddDate(0, 0, 30)
 	tomorrow := today.AddDate(0, 0, 1)

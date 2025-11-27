@@ -47,14 +47,21 @@ func (c *Client) GetSections(accessToken, notebookID string) ([]Section, error) 
 }
 
 func (c *Client) GetPages(accessToken, sectionID string) ([]Page, error) {
-	url := fmt.Sprintf("%s/me/onenote/sections/%s/pages?$select=id,title,lastModifiedDateTime,createdDateTime", graphAPIBase, sectionID)
+	url := fmt.Sprintf("%s/me/onenote/sections/%s/pages?$select=id,title,lastModifiedDateTime,createdDateTime&$top=100", graphAPIBase, sectionID)
 
-	var response PagesResponse
-	if err := c.makeRequest(accessToken, url, &response); err != nil {
-		return nil, fmt.Errorf("get pages (section_id: %s): %w", sectionID, err)
+	var allPages []Page
+
+	for url != "" {
+		var response PagesResponse
+		if err := c.makeRequest(accessToken, url, &response); err != nil {
+			return nil, fmt.Errorf("get pages (section_id: %s): %w", sectionID, err)
+		}
+
+		allPages = append(allPages, response.Value...)
+		url = response.NextLink
 	}
 
-	return response.Value, nil
+	return allPages, nil
 }
 
 func (c *Client) GetPageContent(accessToken, pageID string) (string, error) {

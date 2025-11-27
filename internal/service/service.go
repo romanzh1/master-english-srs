@@ -41,13 +41,15 @@ func (s *Service) RegisterUser(ctx context.Context, telegramID int64, username, 
 		return fmt.Errorf("user already exists (telegram_id: %d)", telegramID)
 	}
 
+	defaultTimezone := "UTC"
 	user := &models.User{
 		TelegramID:     telegramID,
 		Username:       username,
 		Level:          level,
 		UseManualPages: false,
 		ReminderTime:   "09:00",
-		CreatedAt:      time.Now(),
+		CreatedAt:      utils.NowUTC(),
+		Timezone:       &defaultTimezone,
 	}
 
 	if err := s.repo.CreateUser(ctx, user); err != nil {
@@ -83,7 +85,7 @@ func (s *Service) ExchangeAuthCode(ctx context.Context, telegramID int64, code s
 	auth := &models.OneNoteAuth{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
-		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+		ExpiresAt:    utils.NowUTC().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
 	}
 
 	if err := s.repo.UpdateOneNoteAuth(ctx, telegramID, auth); err != nil {
@@ -159,7 +161,7 @@ func (s *Service) updateTokens(ctx context.Context, telegramID int64, tokenResp 
 	auth := &models.OneNoteAuth{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
-		ExpiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+		ExpiresAt:    utils.NowUTC().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
 	}
 
 	if err := s.repo.UpdateOneNoteAuth(ctx, telegramID, auth); err != nil {
@@ -264,7 +266,7 @@ func (s *Service) syncPagesInternal(ctx context.Context, telegramID int64) (int,
 			UserID:    telegramID,
 			Title:     page.Title,
 			Source:    "onenote",
-			CreatedAt: time.Now(),
+			CreatedAt: utils.NowUTC(),
 			UpdatedAt: updatedAt,
 		}
 
@@ -323,7 +325,11 @@ func (s *Service) GetDuePagesToday(ctx context.Context, telegramID int64) ([]*mo
 		return nil, fmt.Errorf("onenote not configured (telegram_id: %d)", telegramID)
 	}
 
-	progressList, err := s.repo.GetDuePagesToday(ctx, telegramID)
+	timezone := "UTC"
+	if user.Timezone != nil && *user.Timezone != "" {
+		timezone = *user.Timezone
+	}
+	progressList, err := s.repo.GetDuePagesToday(ctx, telegramID, timezone)
 	if err != nil {
 		return nil, fmt.Errorf("get due pages today (telegram_id: %d): %w", telegramID, err)
 	}
@@ -456,7 +462,7 @@ func (s *Service) GetUserAllPagesInProgress(ctx context.Context, telegramID int6
 			UserID:    telegramID,
 			Title:     page.Title,
 			Source:    "onenote",
-			CreatedAt: time.Now(),
+			CreatedAt: utils.NowUTC(),
 			UpdatedAt: updatedAt,
 		}
 
@@ -543,9 +549,27 @@ func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pa
 	}
 
 	status := srs.ConvertGradeToStatus(grade)
-	nextReview, newInterval := srs.CalculateNextReviewDate(progress.IntervalDays, status)
 
-	newRepCount := progress.RepetitionCount + 1
+	var nextReview time.Time
+	var newInterval int
+	var historyMode string
+
+	// Режим чтения (IntervalDays == 0): пользователь только читает слова
+	if progress.IntervalDays == 0 {
+		statusStr := string(status)
+		if statusStr == "normal" || statusStr == "easy" {
+			// Пользователь помнит слова → переход к AI режиму завтра
+			nextReview, newInterval = srs.GetNextDayReviewDate()
+		} else {
+			// Пользователь не помнит слова → остаёмся в режиме чтения, повтор завтра
+			nextReview, newInterval = srs.GetNextDayReadingMode()
+		}
+		historyMode = "reading"
+	} else {
+		// AI режим: стандартные SRS интервалы
+		nextReview, newInterval = srs.CalculateNextReviewDate(progress.IntervalDays, status)
+		historyMode = "standard"
+	}
 
 	// Определяем флаг passed: страница считается изученной, если она уже была на последнем интервале (180 дней)
 	// и при текущем прохождении статус = "easy" или "normal" (успешное прохождение последнего интервала)
@@ -555,14 +579,15 @@ func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pa
 		passed = true
 	}
 
+	nowUTC := utils.NowUTC()
 	history := models.ProgressHistory{
-		Date:  time.Now(),
+		Date:  nowUTC,
 		Score: grade,
-		Mode:  "standard", // TODO get from model
+		Mode:  historyMode,
 		Notes: "",
 	}
 
-	if err := s.repo.UpdateProgress(ctx, telegramID, pageID, progress.Level, newRepCount, time.Now(), nextReview, newInterval, true, passed); err != nil {
+	if err := s.repo.UpdateProgress(ctx, telegramID, pageID, progress.Level, progress.RepetitionCount, nowUTC, nextReview, newInterval, true, passed); err != nil {
 		return fmt.Errorf("update progress (telegram_id: %d, page_id: %s): %w", telegramID, pageID, err)
 	}
 
@@ -571,7 +596,7 @@ func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pa
 	}
 
 	// Обновляем дату последней активности пользователя
-	if err := s.repo.UpdateUserActivity(ctx, telegramID, time.Now()); err != nil {
+	if err := s.repo.UpdateUserActivity(ctx, telegramID, nowUTC); err != nil {
 		zap.S().Error("update user activity", zap.Error(err), zap.Int64("telegram_id", telegramID))
 	}
 
@@ -600,6 +625,14 @@ func (s *Service) GetLastReviewScore(ctx context.Context, telegramID int64, page
 func (s *Service) UpdateMaxPagesPerDay(ctx context.Context, telegramID int64, maxPages uint) error {
 	if err := s.repo.UpdateMaxPagesPerDay(ctx, telegramID, maxPages); err != nil {
 		return fmt.Errorf("update max pages per day (telegram_id: %d, max_pages: %d): %w", telegramID, maxPages, err)
+	}
+
+	return nil
+}
+
+func (s *Service) UpdateUserTimezone(ctx context.Context, telegramID int64, timezone string) error {
+	if err := s.repo.UpdateUserTimezone(ctx, telegramID, timezone); err != nil {
+		return fmt.Errorf("update user timezone (telegram_id: %d, timezone: %s): %w", telegramID, timezone, err)
 	}
 
 	return nil
@@ -680,7 +713,7 @@ func (s *Service) addPagesToLearning(ctx context.Context, telegramID int64) erro
 		notInProgress = notInProgress[:pagesToAdd]
 	}
 
-	preparedAt := time.Now()
+	nowUTC := utils.NowUTC()
 	err = s.repo.RunInTx(ctx, func(txRepo models.Repository) error {
 		for _, pageID := range notInProgress {
 			nextReview, interval := srs.GetInitialReviewDate()
@@ -689,7 +722,7 @@ func (s *Service) addPagesToLearning(ctx context.Context, telegramID int64) erro
 				PageID:          pageID,
 				Level:           user.Level,
 				RepetitionCount: 0,
-				LastReviewDate:  time.Now(),
+				LastReviewDate:  nowUTC,
 				NextReviewDate:  nextReview,
 				IntervalDays:    interval,
 				SuccessRate:     0,
@@ -701,11 +734,6 @@ func (s *Service) addPagesToLearning(ctx context.Context, telegramID int64) erro
 				zap.S().Error("create progress in tx", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", pageID))
 				return fmt.Errorf("create progress in tx: %w", err)
 			}
-		}
-
-		if err := txRepo.SetMaterialsPreparedAt(ctx, telegramID, preparedAt); err != nil {
-			zap.S().Error("set materials prepared at in tx", zap.Error(err), zap.Int64("telegram_id", telegramID))
-			return fmt.Errorf("set materials prepared at in tx: %w", err)
 		}
 
 		return nil
@@ -758,9 +786,6 @@ func (s *Service) RunDailyCron(ctx context.Context) error {
 		return fmt.Errorf("get all users: %w", err)
 	}
 
-	now := utils.TruncateToMinutes(time.Now())
-	today := utils.StartOfDay(now)
-
 	for _, user := range users {
 		if user.OneNoteConfig == nil {
 			continue
@@ -772,15 +797,23 @@ func (s *Service) RunDailyCron(ctx context.Context) error {
 			continue
 		}
 
-		if user.MaterialsPreparedAt != nil {
-			preparedDate := utils.StartOfDay(*user.MaterialsPreparedAt)
-			if utils.DatesEqual(preparedDate, today) {
-				zap.S().Info("skipping user with materials already prepared today", zap.Int64("telegram_id", user.TelegramID))
-				continue
-			}
+		// Проверяем, первый ли час дня (00:00-00:59) в таймзоне пользователя
+		timezone := "UTC"
+		if user.Timezone != nil && *user.Timezone != "" {
+			timezone = *user.Timezone
 		}
 
-		_, err := s.syncPagesInternal(ctx, user.TelegramID)
+		isFirstHour, err := utils.IsFirstHourOfDayInTimezone(timezone)
+		if err != nil {
+			zap.S().Warn("failed to check first hour of day in timezone", zap.Error(err), zap.Int64("telegram_id", user.TelegramID), zap.String("timezone", timezone))
+			continue
+		}
+
+		if !isFirstHour {
+			continue
+		}
+
+		_, err = s.syncPagesInternal(ctx, user.TelegramID)
 		if err != nil {
 			if _, ok := err.(*AuthRequiredError); ok {
 				zap.S().Warn("auth required for daily cron", zap.Int64("telegram_id", user.TelegramID))
@@ -828,7 +861,11 @@ func (s *Service) checkAndPauseInactiveUsers(ctx context.Context) error {
 			maxPagesPerDay = *user.MaxPagesPerDay
 		}
 
-		duePagesToday, err := s.repo.GetDuePagesToday(ctx, user.TelegramID)
+		timezone := "UTC"
+		if user.Timezone != nil && *user.Timezone != "" {
+			timezone = *user.Timezone
+		}
+		duePagesToday, err := s.repo.GetDuePagesToday(ctx, user.TelegramID, timezone)
 		if err != nil {
 			zap.S().Error("get due pages today", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
 			continue
