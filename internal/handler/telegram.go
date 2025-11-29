@@ -1348,12 +1348,6 @@ func (h *TelegramHandler) handleSetTimezone(ctx context.Context, update tgbotapi
 }
 
 func (h *TelegramHandler) startDailyCron() {
-	// Run immediately on startup
-	// ctx := context.Background()
-	// if err := h.service.RunDailyCron(ctx); err != nil {
-	// 	zap.S().Error("run daily cron on startup", zap.Error(err))
-	// }
-
 	// Run every hour to check if it's midnight in any user's timezone
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()

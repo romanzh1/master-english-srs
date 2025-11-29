@@ -6,18 +6,30 @@ import (
 	"time"
 
 	"github.com/romanzh1/master-english-srs/internal/models"
-	"github.com/romanzh1/master-english-srs/pkg/utils"
 )
 
-func (r Postgres) CreateUser(ctx context.Context, user *models.User) error {
-	maxPagesPerDay := uint(2)
-	if user.MaxPagesPerDay != nil {
-		maxPagesPerDay = *user.MaxPagesPerDay
+// populateOneNoteFields populates OneNoteAuth and OneNoteConfig from nullable database fields
+func populateOneNoteFields(user *models.User) {
+	if user.AccessToken != nil && user.RefreshToken != nil && user.ExpiresAt != nil {
+		user.OneNoteAuth = &models.OneNoteAuth{
+			AccessToken:  *user.AccessToken,
+			RefreshToken: *user.RefreshToken,
+			ExpiresAt:    *user.ExpiresAt,
+		}
 	}
 
+	if user.NotebookID != nil && user.SectionID != nil {
+		user.OneNoteConfig = &models.OneNoteConfig{
+			NotebookID: *user.NotebookID,
+			SectionID:  *user.SectionID,
+		}
+	}
+}
+
+func (r Postgres) CreateUser(ctx context.Context, user *models.User) error {
 	query := r.psql.Insert("users").
 		Columns("telegram_id", "username", "level", "use_manual_pages", "reminder_time", "max_pages_per_day", "created_at").
-		Values(user.TelegramID, user.Username, user.Level, user.UseManualPages, user.ReminderTime, maxPagesPerDay, user.CreatedAt)
+		Values(user.TelegramID, user.Username, user.Level, user.UseManualPages, user.ReminderTime, user.MaxPagesPerDay, user.CreatedAt)
 
 	sql, args, err := query.ToSql()
 	if err != nil {
@@ -46,20 +58,7 @@ func (r Postgres) GetUser(ctx context.Context, telegramID int64) (*models.User, 
 		return nil, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
 	}
 
-	if user.AccessToken != nil && user.RefreshToken != nil && user.ExpiresAt != nil {
-		user.OneNoteAuth = &models.OneNoteAuth{
-			AccessToken:  *user.AccessToken,
-			RefreshToken: *user.RefreshToken,
-			ExpiresAt:    *user.ExpiresAt,
-		}
-	}
-
-	if user.NotebookID != nil && user.SectionID != nil {
-		user.OneNoteConfig = &models.OneNoteConfig{
-			NotebookID: *user.NotebookID,
-			SectionID:  *user.SectionID,
-		}
-	}
+	populateOneNoteFields(&user)
 
 	return &user, nil
 }
@@ -168,21 +167,7 @@ func (r Postgres) GetAllUsersWithReminders(ctx context.Context) ([]*models.User,
 	users := make([]*models.User, len(dbUsers))
 	for i := range dbUsers {
 		user := &dbUsers[i]
-		if user.AccessToken != nil && user.RefreshToken != nil && user.ExpiresAt != nil {
-			user.OneNoteAuth = &models.OneNoteAuth{
-				AccessToken:  *user.AccessToken,
-				RefreshToken: *user.RefreshToken,
-				ExpiresAt:    *user.ExpiresAt,
-			}
-		}
-
-		if user.NotebookID != nil && user.SectionID != nil {
-			user.OneNoteConfig = &models.OneNoteConfig{
-				NotebookID: *user.NotebookID,
-				SectionID:  *user.SectionID,
-			}
-		}
-
+		populateOneNoteFields(user)
 		users[i] = user
 	}
 
@@ -257,52 +242,7 @@ func (r Postgres) SetUserPaused(ctx context.Context, userID int64, paused bool) 
 	return nil
 }
 
-func (r Postgres) GetUsersWithoutActivityForWeek(ctx context.Context) ([]*models.User, error) {
-	now := utils.NowUTC()
-	weekAgo := now.AddDate(0, 0, -7)
-
-	query := `
-		SELECT telegram_id, username, level, onenote_access_token, onenote_refresh_token, 
-		       onenote_expires_at, onenote_auth_code, onenote_notebook_id, onenote_section_id, 
-		       use_manual_pages, reminder_time, max_pages_per_day, created_at,
-		       is_paused, last_activity_date, timezone
-		FROM users
-		WHERE (last_activity_date IS NULL OR last_activity_date < $1) AND is_paused = FALSE
-	`
-
-	var dbUsers []models.User
-	if err := r.SelectContext(ctx, &dbUsers, query, weekAgo); err != nil {
-		return nil, fmt.Errorf("get users without activity for week: %w", err)
-	}
-
-	users := make([]*models.User, len(dbUsers))
-	for i := range dbUsers {
-		user := &dbUsers[i]
-		if user.AccessToken != nil && user.RefreshToken != nil && user.ExpiresAt != nil {
-			user.OneNoteAuth = &models.OneNoteAuth{
-				AccessToken:  *user.AccessToken,
-				RefreshToken: *user.RefreshToken,
-				ExpiresAt:    *user.ExpiresAt,
-			}
-		}
-
-		if user.NotebookID != nil && user.SectionID != nil {
-			user.OneNoteConfig = &models.OneNoteConfig{
-				NotebookID: *user.NotebookID,
-				SectionID:  *user.SectionID,
-			}
-		}
-
-		users[i] = user
-	}
-
-	return users, nil
-}
-
-func (r Postgres) GetUsersWithoutActivityForMonth(ctx context.Context) ([]*models.User, error) {
-	now := utils.NowUTC()
-	monthAgo := now.AddDate(0, 0, -30)
-
+func (r Postgres) GetUsersWithoutActivityAfter(ctx context.Context, afterTime time.Time, excludePaused bool) ([]*models.User, error) {
 	query := `
 		SELECT telegram_id, username, level, onenote_access_token, onenote_refresh_token, 
 		       onenote_expires_at, onenote_auth_code, onenote_notebook_id, onenote_section_id, 
@@ -312,29 +252,19 @@ func (r Postgres) GetUsersWithoutActivityForMonth(ctx context.Context) ([]*model
 		WHERE (last_activity_date IS NULL OR last_activity_date < $1)
 	`
 
+	if excludePaused {
+		query += " AND is_paused = FALSE"
+	}
+
 	var dbUsers []models.User
-	if err := r.SelectContext(ctx, &dbUsers, query, monthAgo); err != nil {
-		return nil, fmt.Errorf("get users without activity for month: %w", err)
+	if err := r.SelectContext(ctx, &dbUsers, query, afterTime); err != nil {
+		return nil, fmt.Errorf("get users without activity after %v: %w", afterTime, err)
 	}
 
 	users := make([]*models.User, len(dbUsers))
 	for i := range dbUsers {
 		user := &dbUsers[i]
-		if user.AccessToken != nil && user.RefreshToken != nil && user.ExpiresAt != nil {
-			user.OneNoteAuth = &models.OneNoteAuth{
-				AccessToken:  *user.AccessToken,
-				RefreshToken: *user.RefreshToken,
-				ExpiresAt:    *user.ExpiresAt,
-			}
-		}
-
-		if user.NotebookID != nil && user.SectionID != nil {
-			user.OneNoteConfig = &models.OneNoteConfig{
-				NotebookID: *user.NotebookID,
-				SectionID:  *user.SectionID,
-			}
-		}
-
+		populateOneNoteFields(user)
 		users[i] = user
 	}
 

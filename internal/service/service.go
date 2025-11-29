@@ -52,6 +52,11 @@ func (s *Service) RegisterUser(ctx context.Context, telegramID int64, username, 
 		Timezone:       &defaultTimezone,
 	}
 
+	maxPagesPerDay := uint(2)
+	if user.MaxPagesPerDay != nil {
+		user.MaxPagesPerDay = &maxPagesPerDay
+	}
+
 	if err := s.repo.CreateUser(ctx, user); err != nil {
 		return fmt.Errorf("create user (telegram_id: %d, username: %s): %w", telegramID, username, err)
 	}
@@ -329,7 +334,16 @@ func (s *Service) GetDuePagesToday(ctx context.Context, telegramID int64) ([]*mo
 	if user.Timezone != nil && *user.Timezone != "" {
 		timezone = *user.Timezone
 	}
-	progressList, err := s.repo.GetDuePagesToday(ctx, telegramID, timezone)
+
+	// Calculate end of day in user's timezone, then convert to UTC for database query
+	startOfDayInTz, err := utils.StartOfTodayInTimezone(timezone)
+	if err != nil {
+		return nil, fmt.Errorf("get start of day in timezone (telegram_id: %d, timezone: %s): %w", telegramID, timezone, err)
+	}
+
+	endOfDayUTC := startOfDayInTz.AddDate(0, 0, 1).UTC()
+
+	progressList, err := s.repo.GetDuePagesToday(ctx, telegramID, endOfDayUTC)
 	if err != nil {
 		return nil, fmt.Errorf("get due pages today (telegram_id: %d): %w", telegramID, err)
 	}
@@ -550,6 +564,11 @@ func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pa
 
 	status := srs.ConvertGradeToStatus(grade)
 
+	timezone := "UTC"
+	if user.Timezone != nil && *user.Timezone != "" {
+		timezone = *user.Timezone
+	}
+
 	var nextReview time.Time
 	var newInterval int
 	var historyMode string
@@ -559,15 +578,15 @@ func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pa
 		statusStr := string(status)
 		if statusStr == "normal" || statusStr == "easy" {
 			// Пользователь помнит слова → переход к AI режиму завтра
-			nextReview, newInterval = srs.GetNextDayReviewDate()
+			nextReview, newInterval = srs.GetNextDayReviewDate(timezone)
 		} else {
 			// Пользователь не помнит слова → остаёмся в режиме чтения, повтор завтра
-			nextReview, newInterval = srs.GetNextDayReadingMode()
+			nextReview, newInterval = srs.GetNextDayReadingMode(timezone)
 		}
 		historyMode = "reading"
 	} else {
 		// AI режим: стандартные SRS интервалы
-		nextReview, newInterval = srs.CalculateNextReviewDate(progress.IntervalDays, status)
+		nextReview, newInterval = srs.CalculateNextReviewDate(progress.IntervalDays, status, timezone)
 		historyMode = "standard"
 	}
 
@@ -595,7 +614,6 @@ func (s *Service) UpdateReviewProgress(ctx context.Context, telegramID int64, pa
 		zap.S().Error("add progress history", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", pageID))
 	}
 
-	// Обновляем дату последней активности пользователя
 	if err := s.repo.UpdateUserActivity(ctx, telegramID, nowUTC); err != nil {
 		zap.S().Error("update user activity", zap.Error(err), zap.Int64("telegram_id", telegramID))
 	}
@@ -659,13 +677,28 @@ func (s *Service) addPagesToLearning(ctx context.Context, telegramID int64) erro
 		maxPagesPerDay = *user.MaxPagesPerDay
 	}
 
-	// Проверяем количество страниц в процессе
-	pagesInProgress, err := s.repo.CountPagesInProgress(ctx, telegramID)
+	// Получаем timezone пользователя
+	timezone := "UTC"
+	if user.Timezone != nil && *user.Timezone != "" {
+		timezone = *user.Timezone
+	}
+
+	// Calculate end of day in user's timezone, then convert to UTC for database query
+	var endOfDayUTC time.Time
+	startOfDayInTz, err := utils.StartOfTodayInTimezone(timezone)
 	if err != nil {
-		zap.S().Error("count pages in progress", zap.Error(err), zap.Int64("telegram_id", telegramID))
+		zap.S().Error("get start of day in timezone", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("timezone", timezone))
+		endOfDayUTC = utils.StartOfTodayUTC().AddDate(0, 0, 1)
+	} else {
+		endOfDayUTC = startOfDayInTz.AddDate(0, 0, 1).UTC()
+	}
+
+	duePagesToday, err := s.repo.GetDuePagesToday(ctx, telegramID, endOfDayUTC)
+	if err != nil {
+		zap.S().Error("get due pages today", zap.Error(err), zap.Int64("telegram_id", telegramID))
 		// Продолжаем, если ошибка подсчёта
-	} else if uint(pagesInProgress) >= maxPagesPerDay {
-		zap.S().Info("pages in progress >= max pages per day, skipping add pages", zap.Int64("telegram_id", telegramID), zap.Int("pages_in_progress", pagesInProgress), zap.Uint("max_pages_per_day", maxPagesPerDay))
+	} else if uint(len(duePagesToday)) >= maxPagesPerDay {
+		zap.S().Info("due pages today >= max pages per day, skipping add pages", zap.Int64("telegram_id", telegramID), zap.Int("due_pages_today", len(duePagesToday)), zap.Uint("max_pages_per_day", maxPagesPerDay))
 		return nil
 	}
 
@@ -713,16 +746,15 @@ func (s *Service) addPagesToLearning(ctx context.Context, telegramID int64) erro
 		notInProgress = notInProgress[:pagesToAdd]
 	}
 
-	nowUTC := utils.NowUTC()
 	err = s.repo.RunInTx(ctx, func(txRepo models.Repository) error {
 		for _, pageID := range notInProgress {
-			nextReview, interval := srs.GetInitialReviewDate()
+			nextReview, interval := srs.GetInitialReviewDate(timezone)
 			progress := &models.UserProgress{
 				UserID:          telegramID,
 				PageID:          pageID,
 				Level:           user.Level,
 				RepetitionCount: 0,
-				LastReviewDate:  nowUTC,
+				LastReviewDate:  utils.NowUTC(),
 				NextReviewDate:  nextReview,
 				IntervalDays:    interval,
 				SuccessRate:     0,
@@ -846,7 +878,8 @@ func (s *Service) RunDailyCron(ctx context.Context) error {
 }
 
 func (s *Service) checkAndPauseInactiveUsers(ctx context.Context) error {
-	users, err := s.repo.GetUsersWithoutActivityForWeek(ctx)
+	weekAgo := utils.NowUTC().AddDate(0, 0, -7)
+	users, err := s.repo.GetUsersWithoutActivityAfter(ctx, weekAgo, true)
 	if err != nil {
 		return fmt.Errorf("get users without activity for week: %w", err)
 	}
@@ -865,7 +898,18 @@ func (s *Service) checkAndPauseInactiveUsers(ctx context.Context) error {
 		if user.Timezone != nil && *user.Timezone != "" {
 			timezone = *user.Timezone
 		}
-		duePagesToday, err := s.repo.GetDuePagesToday(ctx, user.TelegramID, timezone)
+
+		// Calculate end of day in user's timezone, then convert to UTC for database query
+		var endOfDayUTC time.Time
+		startOfDayInTz, err := utils.StartOfTodayInTimezone(timezone)
+		if err != nil {
+			zap.S().Error("get start of day in timezone", zap.Error(err), zap.Int64("telegram_id", user.TelegramID), zap.String("timezone", timezone))
+			endOfDayUTC = utils.StartOfTodayUTC().AddDate(0, 0, 1)
+		} else {
+			endOfDayUTC = startOfDayInTz.AddDate(0, 0, 1).UTC()
+		}
+
+		duePagesToday, err := s.repo.GetDuePagesToday(ctx, user.TelegramID, endOfDayUTC)
 		if err != nil {
 			zap.S().Error("get due pages today", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
 			continue
@@ -885,13 +929,18 @@ func (s *Service) checkAndPauseInactiveUsers(ctx context.Context) error {
 }
 
 func (s *Service) checkAndResetIntervals(ctx context.Context) error {
-	users, err := s.repo.GetUsersWithoutActivityForMonth(ctx)
+	monthAgo := utils.NowUTC().AddDate(0, 0, -30)
+	users, err := s.repo.GetUsersWithoutActivityAfter(ctx, monthAgo, false)
 	if err != nil {
 		return fmt.Errorf("get users without activity for month: %w", err)
 	}
 
+	today := utils.StartOfTodayUTC()
+	tomorrowUTC := today.AddDate(0, 0, 1)
+	monthFromNowUTC := today.AddDate(0, 0, 30)
+
 	for _, user := range users {
-		if err := s.repo.ResetIntervalForPagesDueInMonth(ctx, user.TelegramID); err != nil {
+		if err := s.repo.ResetIntervalForPagesDueInMonth(ctx, user.TelegramID, tomorrowUTC, monthFromNowUTC); err != nil {
 			zap.S().Error("reset interval for pages due in month", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
 			continue
 		}

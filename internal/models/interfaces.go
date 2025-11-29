@@ -30,7 +30,7 @@ type Repository interface {
 	GetProgress(ctx context.Context, userID int64, pageID string) (*UserProgress, error)
 	UpdateProgress(ctx context.Context, userID int64, pageID string, level string, repetitionCount int, lastReviewDate, nextReviewDate time.Time, intervalDays int, reviewedToday bool, passed bool) error
 	AddProgressHistory(ctx context.Context, userID int64, pageID string, history ProgressHistory) error
-	GetDuePagesToday(ctx context.Context, userID int64, timezone string) ([]*UserProgress, error)
+	GetDuePagesToday(ctx context.Context, userID int64, endOfDayUTC time.Time) ([]*UserProgress, error)
 	GetAllProgressPageIDs(ctx context.Context, userID int64) ([]string, error)
 	GetPageIDsNotInProgress(ctx context.Context, userID int64, pageIDs []string) ([]string, error)
 	ProgressExists(ctx context.Context, userID int64, pageID string) (bool, error)
@@ -40,12 +40,9 @@ type Repository interface {
 
 	UpdateUserActivity(ctx context.Context, userID int64, activityDate time.Time) error
 	SetUserPaused(ctx context.Context, userID int64, paused bool) error
-	GetUsersWithoutActivityForWeek(ctx context.Context) ([]*User, error)
-	GetUsersWithoutActivityForMonth(ctx context.Context) ([]*User, error)
+	GetUsersWithoutActivityAfter(ctx context.Context, afterTime time.Time, excludePaused bool) ([]*User, error)
 
-	CountPagesInProgress(ctx context.Context, userID int64) (int, error)
-	GetPagesDueInNextMonth(ctx context.Context, userID int64) ([]*UserProgress, error)
-	ResetIntervalForPagesDueInMonth(ctx context.Context, userID int64) error
+	ResetIntervalForPagesDueInMonth(ctx context.Context, userID int64, tomorrowUTC, monthFromNowUTC time.Time) error
 }
 
 type Service interface {

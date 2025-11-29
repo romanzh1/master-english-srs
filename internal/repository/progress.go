@@ -7,7 +7,6 @@ import (
 
 	"github.com/Masterminds/squirrel"
 	"github.com/romanzh1/master-english-srs/internal/models"
-	"github.com/romanzh1/master-english-srs/pkg/utils"
 )
 
 func (r Postgres) CreateProgress(ctx context.Context, progress *models.UserProgress) error {
@@ -83,25 +82,7 @@ func (r Postgres) AddProgressHistory(ctx context.Context, userID int64, pageID s
 	return nil
 }
 
-func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64, timezone string) ([]*models.UserProgress, error) {
-	nowUTC := utils.TruncateToMinutes(utils.NowUTC())
-
-	// Convert to user's timezone to determine "today"
-	var endOfDay time.Time
-	if timezone != "" {
-		startOfDayInTz, err := utils.StartOfDayInTimezone(nowUTC, timezone)
-		if err != nil {
-			return nil, fmt.Errorf("get start of day in timezone (user_id: %d, timezone: %s): %w", userID, timezone, err)
-		}
-		// End of day in user's timezone, then convert back to UTC for database comparison
-		endOfDayInTz := startOfDayInTz.AddDate(0, 0, 1)
-		// Convert back to UTC for database query (all times in DB are UTC)
-		endOfDay = endOfDayInTz.UTC()
-	} else {
-		// Fallback to UTC if no timezone specified
-		endOfDay = utils.StartOfDay(nowUTC).AddDate(0, 0, 1)
-	}
-
+func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64, endOfDayUTC time.Time) ([]*models.UserProgress, error) {
 	query := `
 		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate, reviewed_today, passed
 		FROM user_progress
@@ -110,16 +91,18 @@ func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64, timezone s
 	`
 
 	var progressList []*models.UserProgress
-	err := r.SelectContext(ctx, &progressList, query, userID, endOfDay)
+	err := r.SelectContext(ctx, &progressList, query, userID, endOfDayUTC)
 	if err != nil {
-		return nil, fmt.Errorf("query due pages (user_id: %d, cutoff_time: %s): %w", userID, endOfDay.Format(time.RFC3339), err)
+		return nil, fmt.Errorf("query due pages (user_id: %d, cutoff_time: %s): %w", userID, endOfDayUTC.Format(time.RFC3339), err)
 	}
 
 	return progressList, nil
 }
 
 func (r Postgres) ProgressExists(ctx context.Context, userID int64, pageID string) (bool, error) {
-	query := r.psql.Select("COUNT(*)").From("user_progress").Where("user_id = ? AND page_id = ?", userID, pageID)
+	query := r.psql.Select("COUNT(*)").
+		From("user_progress").
+		Where("user_id = ? AND page_id = ?", userID, pageID)
 
 	sql, args, err := query.ToSql()
 	if err != nil {
@@ -135,7 +118,10 @@ func (r Postgres) ProgressExists(ctx context.Context, userID int64, pageID strin
 }
 
 func (r Postgres) GetAllProgressPageIDs(ctx context.Context, userID int64) ([]string, error) {
-	query := `SELECT page_id FROM user_progress WHERE user_id = $1`
+	query := `
+		SELECT page_id 
+		FROM user_progress 
+		WHERE user_id = $1`
 
 	var pageIDs []string
 	err := r.SelectContext(ctx, &pageIDs, query, userID)
@@ -236,57 +222,12 @@ func (r Postgres) DeleteProgress(ctx context.Context, userID int64, pageID strin
 	return nil
 }
 
-func (r Postgres) CountPagesInProgress(ctx context.Context, userID int64) (int, error) {
-	query := r.psql.Select("COUNT(*)").
-		From("user_progress").
-		Where("user_id = ?", userID)
-
-	sql, args, err := query.ToSql()
-	if err != nil {
-		return 0, fmt.Errorf("build SQL query (user_id: %d): %w", userID, err)
-	}
-
-	var count int
-	err = r.QueryRowxContext(ctx, sql, args...).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("count pages in progress (user_id: %d): %w", userID, err)
-	}
-
-	return count, nil
-}
-
-func (r Postgres) GetPagesDueInNextMonth(ctx context.Context, userID int64) ([]*models.UserProgress, error) {
-	now := utils.TruncateToMinutes(utils.NowUTC())
-	today := utils.StartOfDay(now)
-	monthFromNow := today.AddDate(0, 0, 30)
-
-	query := `
-		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate, reviewed_today, passed
-		FROM user_progress
-		WHERE user_id = $1 AND next_review_date <= $2 AND passed = FALSE
-		ORDER BY next_review_date ASC
-	`
-
-	var progressList []*models.UserProgress
-	err := r.SelectContext(ctx, &progressList, query, userID, monthFromNow)
-	if err != nil {
-		return nil, fmt.Errorf("get pages due in next month (user_id: %d): %w", userID, err)
-	}
-
-	return progressList, nil
-}
-
-func (r Postgres) ResetIntervalForPagesDueInMonth(ctx context.Context, userID int64) error {
-	now := utils.TruncateToMinutes(utils.NowUTC())
-	today := utils.StartOfDay(now)
-	monthFromNow := today.AddDate(0, 0, 30)
-	tomorrow := today.AddDate(0, 0, 1)
-
+func (r Postgres) ResetIntervalForPagesDueInMonth(ctx context.Context, userID int64, tomorrowUTC, monthFromNowUTC time.Time) error {
 	query := r.psql.Update("user_progress").
 		Set("interval_days", 1).
-		Set("next_review_date", tomorrow).
+		Set("next_review_date", tomorrowUTC).
 		Where("user_id = ?", userID).
-		Where("next_review_date <= ?", monthFromNow).
+		Where("next_review_date <= ?", monthFromNowUTC).
 		Where("passed = FALSE")
 
 	sql, args, err := query.ToSql()

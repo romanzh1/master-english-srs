@@ -20,65 +20,114 @@ const (
 
 var defaultIntervals = []int{1, 3, 7, 14, 30, 90, 180}
 
-func CalculateNextReviewDate(currentIntervalDays int, success Grade) (time.Time, int) {
+func CalculateNextReviewDate(currentIntervalDays int, success Grade, timezone string) (time.Time, int) {
 	interval := slices.Index(defaultIntervals, currentIntervalDays)
 
 	// Если интервал не найден, используем первый интервал как fallback
 	if interval == -1 {
 		zap.L().Error("Interval not found, using default", zap.Int("requested_days", currentIntervalDays))
-		return calculateInterval(defaultIntervals[0])
+		return calculateInterval(defaultIntervals[0], timezone)
 	}
 
 	switch success {
 	case forgot:
-		return calculateInterval(defaultIntervals[0])
+		return calculateInterval(defaultIntervals[0], timezone)
 	case easy:
 		if interval == len(defaultIntervals)-1 {
-			return calculateInterval(defaultIntervals[interval])
+			return calculateInterval(defaultIntervals[interval], timezone)
 		}
 
-		return calculateInterval(defaultIntervals[interval+1])
+		return calculateInterval(defaultIntervals[interval+1], timezone)
 	case normal:
-		return calculateInterval(defaultIntervals[interval])
+		return calculateInterval(defaultIntervals[interval], timezone)
 	case hard:
 		if interval == 0 {
-			return calculateInterval(defaultIntervals[interval])
+			return calculateInterval(defaultIntervals[interval], timezone)
 		}
 
-		return calculateInterval(defaultIntervals[interval-1])
+		return calculateInterval(defaultIntervals[interval-1], timezone)
 	}
 
-	return calculateInterval(defaultIntervals[interval] + 1)
+	return calculateInterval(defaultIntervals[interval]+1, timezone)
 }
 
-func calculateInterval(interval int) (time.Time, int) {
-	now := utils.NowUTC()
-	t := now.AddDate(0, 0, interval)
+func calculateInterval(interval int, timezone string) (time.Time, int) {
+	// Convert to user's timezone to get "today" in their timezone
+	var startOfDayInTz time.Time
+	var err error
+	if timezone != "" {
+		startOfDayInTz, err = utils.StartOfTodayInTimezone(timezone)
+		if err != nil {
+			zap.L().Warn("Failed to get start of day in timezone, using UTC", zap.String("timezone", timezone), zap.Error(err))
+			startOfDayInTz = utils.StartOfTodayUTC()
+		}
+	} else {
+		startOfDayInTz = utils.StartOfTodayUTC()
+	}
 
-	return utils.StartOfDay(t), interval
+	// Add interval days in user's timezone
+	t := startOfDayInTz.AddDate(0, 0, interval)
+
+	// Convert back to UTC for database storage
+	return t.UTC(), interval
 }
 
 // GetInitialReviewDate returns today's date with interval 0 (reading mode)
-func GetInitialReviewDate() (time.Time, int) {
-	now := utils.NowUTC()
+func GetInitialReviewDate(timezone string) (time.Time, int) {
+	var startOfDayInTz time.Time
+	var err error
+	if timezone != "" {
+		startOfDayInTz, err = utils.StartOfTodayInTimezone(timezone)
+		if err != nil {
+			zap.L().Warn("Failed to get start of day in timezone, using UTC", zap.String("timezone", timezone), zap.Error(err))
+			startOfDayInTz = utils.StartOfTodayUTC()
+		}
+	} else {
+		startOfDayInTz = utils.StartOfTodayUTC()
+	}
 
-	return utils.StartOfDay(now), 0
+	// Convert back to UTC for database storage
+	return startOfDayInTz.UTC(), 0
 }
 
 // GetNextDayReviewDate returns tomorrow's date with interval 1 (transition to AI mode)
-func GetNextDayReviewDate() (time.Time, int) {
-	now := utils.NowUTC()
-	tomorrow := now.AddDate(0, 0, 1)
+func GetNextDayReviewDate(timezone string) (time.Time, int) {
+	var startOfDayInTz time.Time
+	var err error
+	if timezone != "" {
+		startOfDayInTz, err = utils.StartOfTodayInTimezone(timezone)
+		if err != nil {
+			zap.L().Warn("Failed to get start of day in timezone, using UTC", zap.String("timezone", timezone), zap.Error(err))
+			startOfDayInTz = utils.StartOfTodayUTC()
+		}
+	} else {
+		startOfDayInTz = utils.StartOfTodayUTC()
+	}
 
-	return utils.StartOfDay(tomorrow), 1
+	tomorrow := startOfDayInTz.AddDate(0, 0, 1)
+
+	// Convert back to UTC for database storage
+	return tomorrow.UTC(), 1
 }
 
 // GetNextDayReadingMode returns tomorrow's date with interval 0 (stay in reading mode)
-func GetNextDayReadingMode() (time.Time, int) {
-	now := utils.NowUTC()
-	tomorrow := now.AddDate(0, 0, 1)
+func GetNextDayReadingMode(timezone string) (time.Time, int) {
+	var startOfDayInTz time.Time
+	var err error
+	if timezone != "" {
+		startOfDayInTz, err = utils.StartOfTodayInTimezone(timezone)
+		if err != nil {
+			zap.L().Warn("Failed to get start of day in timezone, using UTC", zap.String("timezone", timezone), zap.Error(err))
+			startOfDayInTz = utils.StartOfTodayUTC()
+		}
+	} else {
+		startOfDayInTz = utils.StartOfTodayUTC()
+	}
 
-	return utils.StartOfDay(tomorrow), 0
+	tomorrow := startOfDayInTz.AddDate(0, 0, 1)
+
+	// Convert back to UTC for database storage
+	return tomorrow.UTC(), 0
 }
 
 // CalculatePagesToAdd determines how many pages to add to learning based on max pages per day
