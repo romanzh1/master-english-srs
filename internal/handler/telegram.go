@@ -408,6 +408,9 @@ func (h *TelegramHandler) handleToday(ctx context.Context, update tgbotapi.Updat
 		daysSince := int(nowUTC.Sub(pwp.Progress.LastReviewDate).Hours() / 24)
 		escapedTitle := escapeHTML(pwp.Page.Title)
 
+		displayIntervalDays, stepNumber, totalSteps := getIntervalStepInfo(pwp.Progress.IntervalDays)
+		intervalWord := formatDaysRu(displayIntervalDays)
+
 		pageNumber := extractPageNumberFromTitle(pwp.Page.Title)
 		shouldNumber := pageNumber == 999999
 
@@ -422,12 +425,12 @@ func (h *TelegramHandler) handleToday(ctx context.Context, update tgbotapi.Updat
 			buttonText = fmt.Sprintf("Показать страницу %d", pageNumber)
 		}
 
-		if pwp.Progress.RepetitionCount == 0 {
-			text += fmt.Sprintf("%s%s\n   📅 Новая страница\n   📊 Прогресс: %d повторений\n\n",
-				prefix, escapedTitle, pwp.Progress.RepetitionCount)
+		if pwp.Progress.IntervalDays == 0 {
+			text += fmt.Sprintf("%s%s\n   📅 Новая страница\n   📊 Прогресс: интервал %d %s (шаг %d из %d)\n\n",
+				prefix, escapedTitle, displayIntervalDays, intervalWord, stepNumber, totalSteps)
 		} else {
-			text += fmt.Sprintf("%s%s\n   📅 Последнее повторение: %d дней назад\n   📊 Прогресс: %d повторений\n\n",
-				prefix, escapedTitle, daysSince, pwp.Progress.RepetitionCount)
+			text += fmt.Sprintf("%s%s\n   📅 Последнее повторение: %d дней назад\n   📊 Прогресс: интервал %d %s (шаг %d из %d)\n\n",
+				prefix, escapedTitle, daysSince, displayIntervalDays, intervalWord, stepNumber, totalSteps)
 		}
 
 		callbackData := fmt.Sprintf("show_%d", i)
@@ -495,6 +498,9 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 			continue
 		}
 
+		displayIntervalDays, stepNumber, totalSteps := getIntervalStepInfo(progress.IntervalDays)
+		intervalWord := formatDaysRu(displayIntervalDays)
+
 		lastScore, err := h.service.GetLastReviewScore(ctx, userID, page.PageID)
 		if err != nil {
 			zap.S().Warn("get last review score", zap.Error(err), zap.Int64("telegram_id", userID), zap.String("page_id", page.PageID))
@@ -551,8 +557,8 @@ func (h *TelegramHandler) handlePages(ctx context.Context, update tgbotapi.Updat
 			scoreStr = ""
 		}
 
-		text += fmt.Sprintf("%s%s\n   📅 Следующее повторение: %s\n   📊 Прогресс: %d повторений%s%s\n\n",
-			prefix, escapedTitle, nextReviewStr, progress.RepetitionCount, reviewedTodayStr, scoreStr)
+		text += fmt.Sprintf("%s%s\n   📅 Следующее повторение: %s\n   📊 Прогресс: интервал %d %s (шаг %d из %d)%s%s\n\n",
+			prefix, escapedTitle, nextReviewStr, displayIntervalDays, intervalWord, stepNumber, totalSteps, reviewedTodayStr, scoreStr)
 	}
 
 	h.sendMessage(chatID, text)
@@ -845,7 +851,7 @@ func (h *TelegramHandler) handleShowPage(ctx context.Context, callback *tgbotapi
 
 	// Экранируем содержимое страницы для безопасной вставки в HTML
 	escapedContent := escapeHTML(content)
-	text := fmt.Sprintf("📄 <b>Страница</b>\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n%s\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n", escapedContent)
+	text := fmt.Sprintf("📄 <b>Страница</b>\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n[TOPIC:%s;LEVEL:B1;MODE:STANDART]\n\n%s\n\n━━━━━━━━━━━━━━━━━━━━━━\n\n", duePages[index].Page.Title, escapedContent)
 
 	// Проверяем режим: чтение (IntervalDays == 0) или AI (IntervalDays >= 1)
 	isReadingMode := duePages[index].Progress.IntervalDays == 0
@@ -1117,6 +1123,50 @@ func (h *TelegramHandler) handleTimezoneSelection(ctx context.Context, callback 
 	}
 }
 
+// getIntervalStepInfo возвращает отображаемый интервал (в днях), номер шага и общее количество шагов SRS
+// IntervalDays == 0 считается как интервал 1 день, но это ещё "шаг 0 из 7" (режим чтения)
+func getIntervalStepInfo(intervalDays int) (displayIntervalDays int, stepNumber int, totalSteps int) {
+	defaultIntervals := []int{1, 3, 7, 14, 30, 90, 180}
+	totalSteps = len(defaultIntervals)
+
+	// Интервал 0 (режим чтения) отображаем как 1 день, но шаг 0
+	if intervalDays <= 0 {
+		return defaultIntervals[0], 0, totalSteps
+	}
+
+	for i, v := range defaultIntervals {
+		if v == intervalDays {
+			return v, i + 1, totalSteps
+		}
+	}
+
+	// Если интервал больше максимального из списка, считаем его как последний шаг
+	if intervalDays > defaultIntervals[totalSteps-1] {
+		return defaultIntervals[totalSteps-1], totalSteps, totalSteps
+	}
+
+	// На всякий случай, если интервал "нестандартный", показываем как есть и считаем первым шагом
+	return intervalDays, 1, totalSteps
+}
+
+// formatDaysRu подбирает правильное склонение слова "день" в русском языке
+func formatDaysRu(n int) string {
+	nAbs := n % 100
+	if nAbs >= 11 && nAbs <= 14 {
+		return "дней"
+	}
+
+	last := n % 10
+	switch last {
+	case 1:
+		return "день"
+	case 2, 3, 4:
+		return "дня"
+	default:
+		return "дней"
+	}
+}
+
 func (h *TelegramHandler) handleSetMaxPages(ctx context.Context, update tgbotapi.Update) {
 	userID := update.Message.From.ID
 	chatID := update.Message.Chat.ID
@@ -1348,12 +1398,15 @@ func (h *TelegramHandler) handleSetTimezone(ctx context.Context, update tgbotapi
 }
 
 func (h *TelegramHandler) startDailyCron() {
-	// Run every hour to check if it's midnight in any user's timezone
+	ctx := context.Background()
+	if err := h.service.RunDailyCron(ctx); err != nil {
+		zap.S().Error("run daily cron on startup", zap.Error(err))
+	}
+
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		ctx := context.Background()
 		if err := h.service.RunDailyCron(ctx); err != nil {
 			zap.S().Error("run daily cron", zap.Error(err))
 		}
