@@ -48,7 +48,7 @@ func (r Postgres) GetUser(ctx context.Context, telegramID int64) (*models.User, 
 		SELECT telegram_id, username, level, onenote_access_token, onenote_refresh_token, 
 		       onenote_expires_at, onenote_auth_code, onenote_notebook_id, onenote_section_id, 
 		       use_manual_pages, reminder_time, max_pages_per_day, created_at,
-		       is_paused, last_activity_date, timezone
+		       is_paused, last_activity_date, timezone, last_cron_processed_at
 		FROM users WHERE telegram_id = $1
 	`
 
@@ -155,7 +155,7 @@ func (r Postgres) GetAllUsersWithReminders(ctx context.Context) ([]*models.User,
 		SELECT telegram_id, username, level, onenote_access_token, onenote_refresh_token, 
 		       onenote_expires_at, onenote_auth_code, onenote_notebook_id, onenote_section_id, 
 		       use_manual_pages, reminder_time, max_pages_per_day, created_at,
-		       is_paused, last_activity_date, timezone
+		       is_paused, last_activity_date, timezone, last_cron_processed_at
 		FROM users
 	`
 
@@ -247,7 +247,7 @@ func (r Postgres) GetUsersWithoutActivityAfter(ctx context.Context, afterTime ti
 		SELECT telegram_id, username, level, onenote_access_token, onenote_refresh_token, 
 		       onenote_expires_at, onenote_auth_code, onenote_notebook_id, onenote_section_id, 
 		       use_manual_pages, reminder_time, max_pages_per_day, created_at,
-		       is_paused, last_activity_date, timezone
+		       is_paused, last_activity_date, timezone, last_cron_processed_at
 		FROM users
 		WHERE (last_activity_date IS NULL OR last_activity_date < $1)
 	`
@@ -269,4 +269,47 @@ func (r Postgres) GetUsersWithoutActivityAfter(ctx context.Context, afterTime ti
 	}
 
 	return users, nil
+}
+
+func (r Postgres) UpdateLastCronProcessedAt(ctx context.Context, userID int64, processedAt time.Time) error {
+	query := r.psql.Update("users").
+		Set("last_cron_processed_at", processedAt).
+		Where("telegram_id = ?", userID)
+
+	sql, args, err := query.ToSql()
+	if err != nil {
+		return fmt.Errorf("build SQL query (telegram_id: %d): %w", userID, err)
+	}
+
+	_, err = r.ExecContext(ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("update last cron processed at (telegram_id: %d): %w", userID, err)
+	}
+	return nil
+}
+
+func (r Postgres) TryProcessDailyCronForUser(ctx context.Context, userID int64, startOfTodayUTC time.Time) (bool, error) {
+	// Atomically update last_cron_processed_at only if it hasn't been processed today
+	// This ensures only one replica processes each user
+	query := r.psql.Update("users").
+		Set("last_cron_processed_at", time.Now().UTC()).
+		Where("telegram_id = ?", userID).
+		Where("(last_cron_processed_at IS NULL OR last_cron_processed_at < ?)", startOfTodayUTC)
+
+	sql, args, err := query.ToSql()
+	if err != nil {
+		return false, fmt.Errorf("build SQL query (telegram_id: %d): %w", userID, err)
+	}
+
+	result, err := r.ExecContext(ctx, sql, args...)
+	if err != nil {
+		return false, fmt.Errorf("try process daily cron for user (telegram_id: %d): %w", userID, err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("get rows affected (telegram_id: %d): %w", userID, err)
+	}
+
+	return rowsAffected > 0, nil
 }

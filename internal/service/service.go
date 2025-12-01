@@ -228,14 +228,14 @@ func (s *Service) SaveOneNoteConfig(ctx context.Context, telegramID int64, noteb
 	return nil
 }
 
-func (s *Service) syncPagesInternal(ctx context.Context, telegramID int64) (int, error) {
+func (s *Service) syncPagesInternal(ctx context.Context, telegramID int64) error {
 	user, err := s.repo.GetUser(ctx, telegramID)
 	if err != nil {
-		return 0, fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
+		return fmt.Errorf("get user (telegram_id: %d): %w", telegramID, err)
 	}
 
 	if user.OneNoteConfig == nil {
-		return 0, fmt.Errorf("onenote not configured (telegram_id: %d)", telegramID)
+		return fmt.Errorf("onenote not configured (telegram_id: %d)", telegramID)
 	}
 
 	var pages []onenote.Page
@@ -249,10 +249,9 @@ func (s *Service) syncPagesInternal(ctx context.Context, telegramID int64) (int,
 	})
 
 	if err != nil {
-		return 0, err
+		return err
 	}
 
-	upsertedCount := 0
 	for _, page := range pages {
 		if strings.Contains(page.Title, "*") || !hasPageNumber(page.Title) {
 			continue
@@ -279,10 +278,9 @@ func (s *Service) syncPagesInternal(ctx context.Context, telegramID int64) (int,
 			zap.S().Error("upsert page reference", zap.Error(err), zap.Int64("telegram_id", telegramID), zap.String("page_id", page.ID))
 			continue
 		}
-		upsertedCount++
 	}
 
-	return upsertedCount, nil
+	return nil
 }
 
 // withAuthRetry выполняет операцию OneNote API с автоматической обработкой ошибок авторизации
@@ -788,7 +786,7 @@ func (s *Service) PrepareMaterials(ctx context.Context, telegramID int64) error 
 		return fmt.Errorf("onenote not configured (telegram_id: %d)", telegramID)
 	}
 
-	_, err = s.syncPagesInternal(ctx, telegramID)
+	err = s.syncPagesInternal(ctx, telegramID)
 	if err != nil {
 		if _, ok := err.(*AuthRequiredError); ok {
 			return err
@@ -829,23 +827,31 @@ func (s *Service) RunDailyCron(ctx context.Context) error {
 			continue
 		}
 
-		// Проверяем, первый ли час дня (00:00-00:59) в таймзоне пользователя
+		// Определяем таймзону пользователя
 		timezone := "UTC"
 		if user.Timezone != nil && *user.Timezone != "" {
 			timezone = *user.Timezone
 		}
 
-		isFirstHour, err := utils.IsFirstHourOfDayInTimezone(timezone)
+		// Вычисляем начало сегодняшнего дня в таймзоне пользователя и конвертируем в UTC
+		startOfTodayInTz, err := utils.StartOfTodayInTimezone(timezone)
 		if err != nil {
-			zap.S().Warn("failed to check first hour of day in timezone", zap.Error(err), zap.Int64("telegram_id", user.TelegramID), zap.String("timezone", timezone))
+			zap.S().Warn("failed to get start of today in timezone", zap.Error(err), zap.Int64("telegram_id", user.TelegramID), zap.String("timezone", timezone))
+			continue
+		}
+		startOfTodayUTC := startOfTodayInTz.UTC()
+
+		processed, err := s.repo.TryProcessDailyCronForUser(ctx, user.TelegramID, startOfTodayUTC)
+		if err != nil {
+			zap.S().Error("try process daily cron for user", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
 			continue
 		}
 
-		if !isFirstHour {
+		if !processed {
 			continue
 		}
 
-		_, err = s.syncPagesInternal(ctx, user.TelegramID)
+		err = s.syncPagesInternal(ctx, user.TelegramID)
 		if err != nil {
 			if _, ok := err.(*AuthRequiredError); ok {
 				zap.S().Warn("auth required for daily cron", zap.Int64("telegram_id", user.TelegramID))

@@ -43,6 +43,8 @@ type Repository interface {
 	GetUsersWithoutActivityAfter(ctx context.Context, afterTime time.Time, excludePaused bool) ([]*User, error)
 
 	ResetIntervalForPagesDueInMonth(ctx context.Context, userID int64, tomorrowUTC, monthFromNowUTC time.Time) error
+	UpdateLastCronProcessedAt(ctx context.Context, userID int64, processedAt time.Time) error
+	TryProcessDailyCronForUser(ctx context.Context, userID int64, startOfTodayUTC time.Time) (bool, error)
 }
 
 type Service interface {

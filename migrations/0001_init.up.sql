@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
     reminder_time varchar(10) DEFAULT '09:00',
     last_activity_date timestamptz DEFAULT NOW(),
     timezone varchar(50) NULL,
+    last_cron_processed_at timestamptz NULL,
     created_at timestamptz DEFAULT NOW()
 );
 
