@@ -32,14 +32,12 @@ func CalculateNextReviewDate(currentIntervalDays int, success Grade, timezone st
 	switch success {
 	case forgot:
 		return calculateInterval(defaultIntervals[0], timezone)
-	case easy:
+	case easy, normal:
 		if interval == len(defaultIntervals)-1 {
 			return calculateInterval(defaultIntervals[interval], timezone)
 		}
 
 		return calculateInterval(defaultIntervals[interval+1], timezone)
-	case normal:
-		return calculateInterval(defaultIntervals[interval], timezone)
 	case hard:
 		if interval == 0 {
 			return calculateInterval(defaultIntervals[interval], timezone)

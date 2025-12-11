@@ -86,7 +86,7 @@ func (r Postgres) GetDuePagesToday(ctx context.Context, userID int64, endOfDayUT
 	query := `
 		SELECT user_id, page_id, level, repetition_count, last_review_date, next_review_date, interval_days, success_rate, reviewed_today, passed
 		FROM user_progress
-		WHERE user_id = $1 AND next_review_date <= $2 AND reviewed_today = FALSE
+		WHERE user_id = $1 AND next_review_date < $2 AND reviewed_today = FALSE
 		ORDER BY next_review_date ASC
 	`
 

@@ -752,7 +752,7 @@ func (s *Service) addPagesToLearning(ctx context.Context, telegramID int64) erro
 				PageID:          pageID,
 				Level:           user.Level,
 				RepetitionCount: 0,
-				LastReviewDate:  utils.NowUTC(),
+				LastReviewDate:  utils.NowUTC().AddDate(0, 0, -1),
 				NextReviewDate:  nextReview,
 				IntervalDays:    interval,
 				SuccessRate:     0,
@@ -860,13 +860,13 @@ func (s *Service) RunDailyCron(ctx context.Context) error {
 			zap.S().Warn("failed to sync pages in daily cron", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
 		}
 
+		if err := s.repo.ResetReviewedTodayFlag(ctx, user.TelegramID); err != nil {
+			zap.S().Error("reset reviewed today flag in daily cron", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
+		}
+
 		if err := s.addPagesToLearning(ctx, user.TelegramID); err != nil {
 			zap.S().Error("add pages to learning in daily cron", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
 			continue
-		}
-
-		if err := s.repo.ResetReviewedTodayFlag(ctx, user.TelegramID); err != nil {
-			zap.S().Error("reset reviewed today flag in daily cron", zap.Error(err), zap.Int64("telegram_id", user.TelegramID))
 		}
 	}
 
